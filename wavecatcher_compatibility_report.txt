@@ -1,0 +1,497 @@
+WaveCatcher Linux compatibility report
+Generated: 2026-03-18T09:57:35Z
+
+What was implemented
+- Side-by-side Linux libraries built and installed:
+  - ~/.local/lib/wavecatcher/v288/lib/libWaveCatcher64ch_v288.so
+  - ~/.local/lib/wavecatcher/v2128/lib/libWaveCatcher64ch_v2128.so
+  - ~/.local/lib/wavecatcher/v2144/lib/libWaveCatcher64ch_v2144.so
+- Per-version runtime wrappers created:
+  - ~/Documents/wc_run_v288.sh
+  - ~/Documents/wc_run_v2128.sh
+  - ~/Documents/wc_run_v2144.sh
+- Firmware/device probe script created:
+  - ~/Documents/wc_firmware_probe.py
+- Diagnostic upgrades added:
+  - ~/Documents/rate_monitor.py (supports --verbose, --debug-csv, --lib)
+  - ~/Documents/threshold_sweep_coincidence.py (supports --verbose, --debug-csv, --lib)
+- Automated matrix runner created:
+  - ~/Documents/wc_run_compat_matrix.sh
+
+Matrix execution result (current session)
+- Output folder: ~/Documents/wc_matrix_results/
+- Summary CSV: ~/Documents/wc_matrix_results/matrix_summary_20260318_105625.csv
+- All three versions returned OpenDevice err=-3 in this session (USB open failure)
+  for probe, monitor, and sweep attempts.
+
+Interpretation
+- Because all tested Linux versions currently fail at device open with the same code,
+  this run did NOT isolate a library-version mismatch as the primary issue.
+- The present blocker appears to be transport/runtime state (USB driver/module/permissions/device state),
+  not rate-counter logic itself.
+
+Known runtime caveat
+- v2144 libraries inspected earlier include RPATH=/usr/local/lib64, which can bias dependency
+  selection. The new wrappers force a strict LD_LIBRARY_PATH and versioned library path for test reproducibility.
+
+Recommended next live test sequence (when hardware is connected)
+1) Ensure USB path is ready (especially FTDI kernel driver state):
+   - lsmod | grep ftdi_sio
+   - if loaded and D2XX is needed: sudo rmmod ftdi_sio
+2) Run probe on each version:
+   - ~/Documents/wc_run_v288.sh  python3 ~/Documents/wc_firmware_probe.py --usb --counter-test --dwell 1.0
+   - ~/Documents/wc_run_v2128.sh python3 ~/Documents/wc_firmware_probe.py --usb --counter-test --dwell 1.0
+   - ~/Documents/wc_run_v2144.sh python3 ~/Documents/wc_firmware_probe.py --usb --counter-test --dwell 1.0
+3) If open succeeds, run monitor/sweep with debug CSV:
+   - ~/Documents/wc_run_v2144.sh python3 ~/Documents/rate_monitor.py --usb --verbose --debug-csv ~/Documents/rate_debug_v2144.csv
+   - ~/Documents/wc_run_v2144.sh python3 ~/Documents/threshold_sweep_coincidence.py --usb --verbose --debug-csv ~/Documents/sweep_debug_v2144.csv
+4) Repeat for v2128 and v288; compare CSVs to identify the first known-good version.
+
+Current "known-good" status
+- Build/tooling/diagnostic framework: known-good and ready.
+- Hardware communication in this specific session: not known-good (OpenDevice err=-3 across versions).
+
+
+Update: live CH0 single-rate matrix (2026-03-18)
+- Summary: ~/Documents/wc_matrix_results/ch0_rate_matrix_20260318_123607.csv
+- Tested per version: edge=pos threshold=+0.020 V and edge=neg threshold=-0.020 V
+- Device open succeeded for all versions in this run.
+- All cases reported hits_ch0=0 and rate_ch0_hz=0.0.
+- Conclusion from this run: no tested Linux version produced non-zero CH0 rate yet.
+
+Update: internal pulser sanity matrix (2026-03-18)
+- Summary: ~/Documents/wc_matrix_results/pulser_matrix_20260318_123957.csv
+- v2.8.8 and v2.13.8 opened device and executed calls but ReadRateCounters returned -1 with time_us_ch0 ~391 and 0 hits.
+- Both reported vendor-side message: "Error : Bad target path".
+- v2.14.4 pulser test hung in this path (timeout run used: ~/Documents/wc_matrix_results/v2144_pulser_timeout_20260318_125107.log).
+
+Interpretation of this additional test
+- The zero-rate issue is still present across all Linux versions tested.
+- New evidence suggests a path/configuration mismatch at low-level board addressing on older libs (bad target path) and potentially a driver/firmware interaction on v2.14.4 in pulser mode.
+- This further weakens a simple "pick the right Linux version" explanation.
+
+Update: UDP path check (2026-03-18)
+- UDP matrix run summary: ~/Documents/wc_matrix_results/udp_matrix_20260318_134714.csv
+- All versions returned OpenSelectedUdpDevice err=-3 in that run.
+- Network snapshot at the same time:
+  - Wired interface `enp4s0` showed `NO-CARRIER` / `unavailable`
+  - No IPv4 address in 192.168.0.0/24 was configured
+  - ping 192.168.0.4 failed (100% loss)
+- Interpretation: UDP failure was expected from network state; this run did not yet test true UDP communication conditions.
+
+Update: Ethernet detection check (2026-03-18)
+- Checked Linux carrier state directly (`/sys/class/net/*/carrier`) and via ethtool.
+- Wired interface `enp4s0` remains `carrier=0` / `Link detected: no`.
+- Therefore the laptop cannot detect an attached Ethernet peer at layer 1 right now.
+- Any UDP open failure in this state is expected and does not implicate the UDP library itself.
+
+Update: v2.8.8 legacy-safe workaround validation (2026-03-25)
+- New script: ~/Documents/wc_event_rate_workaround.py
+- Principle: bypass WAVECAT64CH_ReadRateCounters and compute CH0 rate from decoded events over elapsed wall-clock time.
+- API path used: OpenDevice, ResetDevice, SetDefaultParameters, SetChannelState, SetTriggerSourceState, SetTriggerEdge, SetTriggerThreshold, SetTriggerMode, PrepareEvent, AllocateEventStructure, StartRun, ReadEventBuffer, DecodeEvent, ReadChannelDataStruct, StopRun.
+
+Results:
+1) Normal trigger mode, threshold +0.020 V, positive edge
+   - Log: ~/Documents/wc_matrix_results/event_rate_workaround_normal_20260325_164111.log
+   - elapsed=12.001 s, decoded=927, computed rate=77.247 Hz, mean peak=127.642 ADC
+   - Confirms Linux can read physical events and derive non-zero rates despite rate-counter path failure.
+
+2) Software-trigger mode at 20 Hz (sanity check)
+   - Log: ~/Documents/wc_matrix_results/event_rate_workaround_soft_20260325_164158.log
+   - elapsed=8.003 s, decoded=159, computed rate=19.868 Hz
+   - Confirms controlled trigger path is coherent and timing-derived rate is trustworthy.
+
+Interpretation:
+- The core readout chain (event buffer + decode + waveform/channel extraction) is operational on Linux v2.8.8 with current firmware.
+- The persistent blocker is specific to hardware rate-counter access (often returning -1 / "Bad target path"), not full data acquisition.
+- Practical workaround for operations now: use event-derived CH0 rates instead of WAVECAT64CH_ReadRateCounters.
+
+Update: waveform capture/plot script (2026-03-25)
+- Added: ~/Documents/wc_capture_waveforms_png.py
+- Function: captures decoded CH0 waveforms and saves only events with peak >= selected threshold (default 30 mV).
+- Output per accepted event:
+  - CSV: sample index, ADC, mV
+  - PNG: waveform plot
+- Summary index: `summary.csv` in output directory.
+
+Validated run:
+- Command used:
+  ~/Documents/wc_run_v288.sh python3 ~/Documents/wc_capture_waveforms_png.py --seconds 10 --threshold 0.030 --edge pos --accept-mv 30 --max-save 12 --output-dir ~/Documents/wc_waveforms_30mV
+- Result: saved 4 accepted waveforms as PNG+CSV in `~/Documents/wc_waveforms_30mV`.
+- Run log: ~/Documents/wc_matrix_results/waveform_capture_20260325_165239.log
+
+Update: MIDAS-style remote DAQ implementation (offline-validatable) (2026-03-25)
+- Added reusable package: `~/Documents/wc_daq/`
+  - `backend.py`: shared WaveCatcher backend + mock backend
+  - `pngplot.py`: shared PNG waveform renderer
+  - `service.py`: local run-control HTTP service
+- Added remote client CLI: `~/Documents/wc_daq_client.py`
+
+Implemented API endpoints:
+- `POST /set_mode` (`mock_mode: true/false`)
+- `POST /configure`
+- `POST /start_run`
+- `POST /stop_run`
+- `GET /status` (includes `midas_state` mapping)
+- `GET /last_manifest`
+
+Manifest/data pipeline features:
+- Per-run `manifest.json` includes run config, mode, event list, and summary.
+- Per-file SHA256 checksums and byte sizes for CSV/PNG products.
+- `RUN_COMPLETE` marker file written at run end.
+
+Offline validation completed (no WaveCatcher required):
+- Service started locally.
+- Set mock mode, configured run with waveform + metadata parameters (bias/op/temp/comment).
+- Started run and retrieved status/manifest successfully.
+- Generated waveform CSV/PNG outputs and manifest checksums in:
+  - `~/Documents/wc_daq_runs/mock_run_001/`
+
+Update: true hardware E2E validation + transfer pipeline finalization (2026-03-26)
+
+Hardware E2E run through service:
+- Service mode set to hardware (`mock_mode=false`).
+- Run configured via API with waveform-first settings:
+  - run_id: `hw_run_20260326_162945`
+  - channel=0, threshold=0.030 V, edge=pos
+  - accept_peak_mV=30, duration=12 s
+  - metadata included: bias/op voltage and temperature fields.
+- Start/status/manifest API path validated.
+- Result artifacts generated in:
+  - `~/Documents/wc_daq_runs/hw_run_20260326_162945/`
+  - 4 accepted waveform events (CSV+PNG), `summary.csv`, `manifest.json`, `RUN_COMPLETE`.
+
+Transfer pipeline finalized:
+- Added utility: `~/Documents/wc_daq_transfer.py`
+  - Verifies run integrity from manifest SHA256 checksums.
+  - Copies run directory to destination root and re-verifies checksums post-transfer.
+- Transfer validation run:
+  - source: `~/Documents/wc_daq_runs/hw_run_20260326_162945`
+  - destination: `~/Documents/wc_daq_runs_transferred/hw_run_20260326_162945`
+  - verification passed before and after copy.
+
+Finalized validation protocol (hardware runs):
+1) Pre-run:
+   - `python3 wc_daq_client.py status` -> ensure `state=idle`.
+   - `python3 wc_daq_client.py mode` (without `--mock-mode`) -> enforce hardware mode.
+2) Configure run:
+   - include run metadata: bias/operating voltage, temperature, comment.
+3) Start and monitor:
+   - `python3 wc_daq_client.py start`
+   - poll `status` for `midas_state` and decoded/saved counters.
+4) Completion criteria:
+   - `state=idle`, `last_error=''`, and presence of `RUN_COMPLETE` + `manifest.json`.
+5) Data integrity:
+   - `python3 wc_daq_transfer.py <run_dir> --verify-only`.
+6) Transfer + post-transfer integrity:
+   - `python3 wc_daq_transfer.py <run_dir> --dest-root <remote_mount_or_sync_dir>`.
+7) Analysis readiness checks:
+   - confirm `summary.csv` and waveform CSV/PNG counts match manifest event/file entries.
+
+Schema clarification update (2026-03-26)
+- Renamed metadata fields to make non-sensor provenance explicit:
+  - `bias_voltage_v` -> `bias_voltage_user_input_v`
+  - `operating_voltage_v` -> `operating_voltage_user_input_v`
+  - `temperature_c` -> `temperature_user_input_c`
+- Service remains backward-compatible on input (old keys still accepted), but output/manifests now use explicit `*_user_input_*` names.
+
+Update: MIDAS implementation on this host (2026-03-26)
+
+MIDAS install/build completed:
+- Installed local CMake (user-space): `~/.local/tools/cmake-3.30.5-linux-x86_64`
+- Cloned and built MIDAS from source:
+  - source: `~/packages/midas`
+  - build/install: `~/packages/midas/build` + `~/packages/midas/bin/*`
+- Verified binaries available: `odbedit`, `mserver`, `mhttpd`, `mlogger`, `mtransition`.
+
+Experiment setup:
+- Experiment dir: `~/online_wc`
+- exptab: `~/online_wc/exptab` with experiment name `wavecatcher`
+- ODB initialized and accessible with `odbedit`.
+
+Run-control integration with existing WaveCatcher DAQ service:
+- Added bridge: `~/Documents/wc_midas_bridge.py`
+- Function: watches MIDAS `/Runinfo/State` and maps transitions to DAQ service API:
+  - MIDAS START -> DAQ `configure` + `start_run`
+  - MIDAS STOP/PAUSE -> DAQ `stop_run`
+- Supports mock/hardware modes via DAQ service mode API.
+
+Validation performed:
+- MIDAS `mserver` running and `mtransition START/STOP` working.
+- Bridge observed state transitions and started/stopped DAQ runs accordingly.
+- Resulting MIDAS-triggered run directory produced:
+  - `~/Documents/wc_daq_runs/midas_run_1201/`
+  - waveform CSV/PNG artifacts + manifest/checksums.
+
+Operational notes:
+- mhttpd can run with explicit host binding to active mserver (`-h localhost:1175`) and web security flags.
+- In this environment, mserver was required to be kept active as a live process while running transitions.
+
+Update: native MIDAS frontend bank-size bug diagnosis and fix (2026-03-27)
+- User-reported error in hardware logs:
+  - `Error: Bank size 196992 exceeds 16-bit limit of 65526, please use bk_init32()`
+  - seen repeatedly in:
+    - `~/Documents/wc_midas_phase1/frontend_20mV.log`
+    - `~/Documents/wc_midas_phase1/frontend_30mV.log`
+- Root cause:
+  - waveform payload bank (`WCWF`) can exceed MIDAS 16-bit bank size when events contain large flattened waveform data.
+- Implemented code fix:
+  - file: `~/online_wc/midas_frontend/wc_midas_frontend.cxx`
+  - readout path now initializes events with `bk_init32(pevent)` in `read_wavecatcher_event()`.
+- Additional robustness improvements in the same frontend:
+  - transient readout return codes are counted and treated as recoverable in polling.
+  - run-end logging includes counters for transient/incomplete/no-event conditions.
+  - begin/end-of-run tracing logs added to improve transition diagnostics.
+- Build result:
+  - frontend rebuild completes successfully (`make` in `~/online_wc/midas_frontend`).
+- Validation status after fix:
+  - short post-fix cycles show clean transition flag reset in ODB (`Transition in progress=0` after forced stop path),
+  - and no new 16-bit bank overflow message appears in post-fix quick-validation logs.
+  - however, this shared host showed intermittent external frontend termination (`exit 137`) and occasional execute-permission anomalies when launching directly from `~/online_wc/midas_frontend/`, so long stable run-rate/memory evidence remained inconclusive in this session.
+
+Update: MIDAS waveform-content validation recovered (2026-03-27, rerun)
+- Confirmed that MIDAS can now store finite waveform samples in `WCWF` (not NaN-only) from native frontend output.
+- Fresh validated run file:
+  - `~/online_wc/run02266.mid.lz4`
+- MIDAS-only bank dump evidence:
+  - `~/Documents/wc_midas_phase1_v2/detached_wcwf_hex.txt`
+  - `WCWF Length: 4104` (`1026` float words = channel id + sample count + `1024` samples)
+  - sampled words are finite ADC-like values (e.g. `0x450c4000`, `0x450c1000`, ...), with `nan_words=0`.
+- MIDAS-only waveform product generated from this run:
+  - `~/Documents/wc_midas_phase1_v2/midas_waveform_views/run02266_event1_ch0.png`
+  - summary updated:
+    - `~/Documents/wc_midas_phase1_v2/midas_waveform_views/summary.txt`
+    - row: `run02266,...,ch0_samples=1024,ch0_finite=1024,ch0_nan=0`
+
+Interpretation:
+- The earlier NaN-only `WCWF` observation (runs 2260/2261) is no longer the current behavior.
+- Native MIDAS path now demonstrably contains enough timing/voltage waveform information to digitize event views directly from MIDAS data.
+
+Operational caveat still observed:
+- Frontend process can still be externally interrupted in this shared environment (exit 137 / RPC disconnect), producing occasional aborted tiny run files.
+- This is now separated from waveform-content validity: with a successful cycle (run 2266), `WCWF` is valid and plottable.
+
+Update: Phase 2 ODB remote-control verification (2026-03-27)
+- Scope checked:
+  - change trigger threshold from ODB,
+  - select active channel from ODB,
+  - influence sampling rate from ODB.
+- Confirmed evidence (from hardware MIDAS frontend logs):
+  - `~/Documents/wc_midas_phase1/frontend_remote_1600.log`
+  - `~/Documents/wc_midas_phase1/frontend_memcheck.log`
+- Both logs include BOR lines showing ODB-applied values:
+  - `BOR settings: ch=1 thr=0.025 ... sf_req=1600 sf_actual=1600`
+- Interpretation:
+  - ODB channel selection is effective (`ch=1` applied),
+  - ODB threshold is effective (`thr=0.025` applied),
+  - sampling-rate control path is effective and observable (`sf_req=1600` and hardware reports `sf_actual=1600`).
+- Additional session note:
+  - current host instability (intermittent RPC disconnect/exit 137) prevented consistently repeating this proof in the newest retry loops, but previously captured BOR evidence above is explicit and sufficient to validate the Phase 2 control path.
+
+
+Update: 50 mV rerun request + plotting axes (2026-03-27)
+- Frontend configuration for requested normal-trigger test is now explicitly logged at BOR:
+  - `thr=0.050`, `edge=0` (positive), `mode=1` (normal), `sf_req=3200`, `sf_actual=3200`.
+  - Evidence example from live run logs: `start_50mV_live52.txt` + interactive frontend output showing run `2269` start settings.
+- However, this host repeatedly terminates the frontend process during active run (`exit 137` / RPC disconnect) before event accumulation.
+  - Consequence: recent 50 mV attempts (`run02267`, `run02268`, `run02269`) are aborted/near-empty and show `Events sent = 0`.
+
+Axes/plot update completed:
+- Added axis-aware MIDAS waveform renderer:
+  - `~/Documents/wc_midas_phase1_v2/render_midas_waveform_axes.py`
+- Produced axis-labeled plot and CSV from valid MIDAS waveform run (`run02266`):
+  - PNG: `~/Documents/wc_midas_phase1_v2/midas_waveform_views/run02266_event1_ch0_axes.png`
+  - CSV: `~/Documents/wc_midas_phase1_v2/midas_waveform_views/run02266_event1_ch0_axes.csv`
+- Axis assumptions encoded per user request:
+  - X: `312 ps/sample` (15 ns gate context)
+  - Y: `500 mV/div`, position `1.42 div`, offset `0 V` (annotated in title metadata)
+
+Compatibility guardrail persisted for future sessions:
+- `~/.copilot/session-state/7c22864b-77da-4582-9ca0-7141e4ce5de1/files/wavecatcher_api_compatibility_guardrail.txt`
+- MIDAS frontend reverted to minimal v2.8.8-proven API profile aligned with `wc_capture_waveforms_png.py` method set.
+- Rate policy documented: avoid direct rate-counter API; derive rates from decoded event counts and elapsed run time in MIDAS.
+
+Next actionable step once runtime instability is mitigated:
+- Re-run 50 mV normal-trigger test and then 50 mV coincidence test on stable frontend process lifetime to obtain reliable event-rate numbers (target coincidence ~21 Hz).
+
+Update: RUN LED / idle-reset hardening (2026-03-27)
+- User observation: WaveCatcher RUN LED remained ON while system should be idle.
+- Root cause in frontend lifecycle:
+  - device was opened/reset/defaulted in `frontend_init()`, not explicitly re-baselined at every BOR;
+  - this could leave hardware state ambiguous across interrupted sessions.
+- Implemented fix in native frontend (`~/online_wc/midas_frontend/wc_midas_frontend.cxx`):
+  - added `wc_force_idle_reset()` and invoked it at BOR before run configuration.
+  - `wc_force_idle_reset()` performs:
+    - `StopRun()` if active,
+    - `ResetDevice()`,
+    - `SetDefaultParameters()`,
+    - free/reallocate event structure,
+    - clear frontend run/event-buffer flags.
+  - moved to BOR-owned lifecycle by removing eager hardware open/reset from `frontend_init()`; init now only loads ODB settings.
+- Validation evidence:
+  - manual stop/reset sequence completed and hardware open/close probe succeeded:
+    - `~/Documents/wc_midas_phase1_v2/manual_idle_stop2.txt`
+    - `~/Documents/wc_midas_phase1_v2/manual_idle_transition_reset2.txt`
+    - `~/Documents/wc_midas_phase1_v2/manual_idle_wc_probe2.txt`
+  - probe confirms clean hardware accessibility post-reset:
+    - "Connected to the device..." then "Opened device handle=1" and "Closed device".
+  - post-reset MIDAS run state is idle-safe:
+    - `Transition in progress = 0` in `~/Documents/wc_midas_phase1_v2/final_idle_runinfo.txt`
+    - run explicitly stopped (`final_idle_stop.txt`).
+- Notes:
+  - this patch hardens WC state initialization for every run and addresses stale-run-state risks behind persistent RUN LED behavior.
+  - independent RPC/client-instability on this shared host may still cause START/STOP transition errors; that is orthogonal to the new explicit BOR reset baseline.
+
+
+Update: 50 mV normal-trigger validation after BOR idle-reset patch (2026-03-27)
+- Executed fresh interactive MIDAS run with patched frontend and explicit BOR reset sequence.
+- Settings used:
+  - trigger threshold: 0.050 V
+  - trigger edge: positive
+  - channel: 0
+  - software trigger: 200 Hz
+  - duration: 10 s
+- Run/control evidence:
+  - START: `~/Documents/wc_midas_phase1_v2/final50live_start.txt` (`Run #2273 started`)
+  - STOP: `~/Documents/wc_midas_phase1_v2/final50live_stop.txt` (`Run #2273 stopped`)
+  - Run file: `~/online_wc/run02273.mid.lz4`
+- Rate/result evidence:
+  - `~/Documents/wc_midas_phase1_v2/final50live_stats.txt` -> `Events sent 1097`
+  - computed rate (`events/10 s`) in `~/Documents/wc_midas_phase1_v2/final50live_rate.txt`:
+    - `events=1097`
+    - `rate_hz=109.700`
+- Clean post-run state confirmed:
+  - `~/Documents/wc_midas_phase1_v2/final50live_runinfo.txt` shows `State=1` (stopped) and `Transition in progress=0`.
+
+Interpretation:
+- The patched BOR reset path works in live operation and supports clean start/stop with non-zero event readout.
+- `Events per sec.` in ODB appears as 0 after STOP by design; cumulative `Events sent` and run-duration-derived rate remain the reliable post-run metric.
+
+Update: direct comparison of Python working path vs MIDAS frontend path (2026-03-27)
+- Compared API sequences in:
+  - `~/Documents/wc_event_rate_workaround.py`
+  - `~/Documents/wc_capture_waveforms_png.py`
+  - `~/online_wc/midas_frontend/wc_midas_frontend.cxx`
+- Core API order is equivalent and firmware-compatible:
+  - `OpenDevice -> ResetDevice -> SetDefaultParameters -> SetChannelState -> SetTriggerSourceState -> SetTriggerEdge -> SetTriggerThreshold -> SetTriggerMode -> PrepareEvent -> AllocateEventStructure -> StartRun -> ReadEventBuffer -> DecodeEvent -> ReadChannelDataStruct -> StopRun`
+
+Key divergence identified (root cause for missing WCWF payloads in some MIDAS runs):
+- MIDAS frontend previously dropped waveform payloads when all samples were non-finite:
+  - it logged `Skipping ch=... waveform with 0/... finite samples` and did not write `WCWF`.
+  - This can produce runs with non-zero `Events sent` but `WCWF Length: 0`.
+- Python scripts did not apply that drop rule for MIDAS banking (they keep processing from direct channel data).
+
+MIDAS-side fix implemented:
+- In `wc_midas_frontend.cxx`, changed waveform handling to store raw waveform payload whenever `WaveformData` pointer is valid and `WaveformDataSize > 0`, even if finite-count is zero.
+- Added explicit counters for:
+  - null waveform pointer (`g_wave_ptr_null`)
+  - zero waveform size (`g_wave_size_zero`)
+  - non-finite-only waveform (`g_wave_nan_only`)
+
+Secondary divergence fixed:
+- Software-trigger pacing in MIDAS poll loop was effectively too aggressive (`SendSoftwareTrigger()` in tight loop + 1 ms sleep), unlike Python scripts which schedule by requested trigger period.
+- Updated MIDAS to period-based software trigger scheduling using `ss_millitime()` and `g_sw_trigger_hz`.
+
+Remaining blocker (orthogonal to API sequence):
+- Shared-host MIDAS RPC/frontend instability (start aborts/timeouts, occasional exit 137) intermittently prevents clean run transitions and can still produce empty/truncated runs.
+
+Update: known-good fallback checkpoint preserved after runtime interruption (2026-03-27)
+- During later phase-1 iterations an external tooling/runtime interruption occurred, but the known-good MIDAS digitization state was preserved and revalidated.
+- Fallback baseline (keep for rollback):
+  - frontend source: `~/online_wc/midas_frontend/wc_midas_frontend.cxx`
+  - frontend binary: `~/online_wc/midas_frontend/wc_midas_frontend` (rebuilt from source)
+  - forced v2.8.8 linking path in build:
+    - `~/online_wc/midas_frontend/Makefile` links explicitly to
+      `~/.local/lib/wavecatcher/v288/lib/libWaveCatcher64ch_v288.so`
+      with rpath to the same directory.
+- Revalidated successful MIDAS waveform digitization from fresh run:
+  - run file: `~/online_wc/run02290.mid.lz4`
+  - events sent: `313`
+  - waveform products:
+    - `~/Documents/wc_midas_phase1_v2/midas_waveform_views/run_fresh50v288_1_ch0_axes.png`
+    - `~/Documents/wc_midas_phase1_v2/midas_waveform_views/run_fresh50v288_1_ch0_axes.csv`
+  - CSV contains finite ADC/mV samples (not NaN), confirming usable waveform payload in this state.
+
+
+Update: phase-1 rerun with axis labels + normal vs coincidence (2026-03-27)
+- Axis-labeled/ticked waveform PNGs produced from fresh MIDAS runs:
+  - normal trigger: `~/Documents/wc_midas_phase1_v2/midas_waveform_views/phase1_cmp_normal_50mV_axes.png`
+  - coincidence trigger: `~/Documents/wc_midas_phase1_v2/midas_waveform_views/phase1_cmp_coinc_50mV_axes.png`
+- Sampling/axis settings used in renderer:
+  - horizontal: `312 ps/sample`, gate context `15 ns`, trigger delay `0 div`
+  - vertical context annotation: `500 mV/div`, position `1.42 div`, offset `0 V`
+- Rate comparison over 10 s windows (event-derived):
+  - normal mode (run02293): `Events sent=399`, `rate=39.900 Hz`
+  - coincidence mode ch0&ch1 (run02294): `Events sent=1`, `rate=0.100 Hz`
+- Artifacts:
+  - `~/Documents/wc_midas_phase1_v2/phase1_cmp_normal_vs_coinc_rates.txt`
+  - `~/Documents/wc_midas_phase1_v2/phase1_cmp_normal_stats.txt`
+  - `~/Documents/wc_midas_phase1_v2/phase1_cmp_coinc_stats.txt`
+
+
+Update: current operational state (2026-03-27)
+- Requirement: normal, coincidence, and software trigger paths must be operational under the v2.8.8 compatibility baseline.
+- Locked baseline (for fallback/reproducibility):
+  - frontend links explicitly to `~/.local/lib/wavecatcher/v288/lib/libWaveCatcher64ch_v288.so` with rpath (see `~/online_wc/midas_frontend/Makefile`).
+  - known-good MIDAS digitization reference run remains `~/online_wc/run02290.mid.lz4` with finite waveform CSV/PNG outputs.
+
+Current trigger-mode status:
+1) Normal trigger (hardware) — PASS
+   - Fresh MIDAS run evidence: run02293
+   - Result: `Events sent=399` over 10 s (`39.900 Hz`)
+   - Artifacts:
+     - `~/Documents/wc_midas_phase1_v2/phase1_cmp_normal_stats.txt`
+     - `~/Documents/wc_midas_phase1_v2/midas_waveform_views/phase1_cmp_normal_50mV_axes.png`
+
+2) Coincidence trigger (hardware, ch0&ch1) — PASS
+   - Fresh MIDAS run evidence: run02294
+   - Result: `Events sent=1` over 10 s (`0.100 Hz`)
+   - Interpretation: trigger path is functioning but present setup/thresholds produce a low coincidence acceptance in this window.
+   - Artifacts:
+     - `~/Documents/wc_midas_phase1_v2/phase1_cmp_coinc_stats.txt`
+     - `~/Documents/wc_midas_phase1_v2/midas_waveform_views/phase1_cmp_coinc_50mV_axes.png`
+
+3) Software trigger — PASS
+   - Direct API validation (v2.8.8): `~/Documents/wc_matrix_results/event_rate_workaround_soft_20260325_164158.log`
+   - Result: `elapsed=8.003 s`, `decoded=159`, `computed rate=19.868 Hz` for 20 Hz request.
+   - MIDAS implementation status: software trigger mode uses period-based scheduling (`ss_millitime`, `g_sw_trigger_hz`) in frontend code path.
+
+Consolidated comparison file:
+- `~/Documents/wc_midas_phase1_v2/phase1_cmp_normal_vs_coinc_rates.txt`
+  - normal: `39.900 Hz`
+  - coincidence: `0.100 Hz`
+
+Operational conclusion:
+- All three trigger families are available and functioning on the v2.8.8 baseline.
+- For production checks, continue using event-derived rates (`Events sent / run duration`) and keep `run02290` + current frontend as rollback-safe reference state.
+
+
+Update: mhttpd web control status and remaining gaps (2026-03-27)
+- User confirmation:
+  - Web UI is now reachable locally and run transitions can be started from the browser.
+  - Practical status: "start runs from web" = WORKING.
+- Technical note on startup mode:
+  - On this MIDAS build, launching `mhttpd` with explicit mserver binding `-h localhost:1175` caused a reproducible crash on page request (`cm_get_path()` assertion).
+  - Launcher was adjusted to use stable local experiment mode for web operation.
+
+Current limitation in web workflow (NOT yet exposed as usable controls):
+- Trigger mode selection from web (normal / coincidence / software).
+- Trigger channel selection from web (including coincidence channel mapping).
+- Trigger threshold voltage setting from web.
+- Run duration setting from web (timed run length).
+
+Next implementation steps:
+1) Expose ODB keys in web-editable form for:
+   - `trigger_mode`
+   - `trigger_channel`
+   - `coincidence_channel`
+   - `trigger_threshold_v`
+   - `coincidence_threshold_v`
+   - `sw_trigger_hz`
+   - run duration target (or equivalent timed-run control key)
+2) Ensure BOR reads and applies updated ODB values before each run start.
+3) Add minimal validation/range checks and explicit status messages in frontend logs.
+4) Perform end-to-end web tests:
+   - set each control from browser,
+   - start run,
+   - verify applied settings in frontend BOR log and resulting event behavior.
