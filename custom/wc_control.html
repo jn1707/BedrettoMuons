@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html class="mcss" lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="midas.css">
+  <script src="midas.js"></script>
+  <script src="mhttpd.js"></script>
+  <title>WaveCatcher Control</title>
+  <style>
+    .row { display: flex; gap: 10px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
+    .lbl { min-width: 210px; font-weight: 600; }
+    .box { width: 180px; }
+    .wide { width: 420px; }
+    .mono { font-family: monospace; }
+    .hint { color: #555; font-size: 90%; margin-left: 220px; }
+    canvas { border: 1px solid #ccc; background: #fff; }
+  </style>
+</head>
+<body class="mcss" onload="initPage()">
+<div id="mheader"></div>
+<div id="msidenav"></div>
+
+<div id="mmain">
+  <table class="mtable">
+    <tr><th class="mtableheader">WaveCatcher Guided Control (MVP)</th></tr>
+    <tr><td>
+      <div class="row"><span class="lbl">Trigger mode</span>
+        <select id="trigger_mode" class="box">
+          <option value="0">Normal</option>
+          <option value="1">Software</option>
+          <option value="2">Coincidence</option>
+        </select>
+      </div>
+      <div class="row"><span class="lbl">Trigger edge</span>
+        <select id="trigger_edge" class="box">
+          <option value="0">Positive</option>
+          <option value="1">Negative</option>
+        </select>
+      </div>
+      <div class="row"><span class="lbl">Primary channel</span><input id="enabled_channel" class="box" type="number" min="0" max="63"></div>
+      <div class="row"><span class="lbl">Selected channels CSV</span><input id="enabled_channels_csv" class="wide" type="text" placeholder="0,1,2,3"></div>
+      <div class="hint">Channels you want enabled/configured together (example: <span class="mono">0,1,2</span>).</div>
+      <div class="row"><span class="lbl">Trigger threshold [V]</span><input id="trigger_threshold_v" class="box" type="number" step="0.001"></div>
+      <div class="hint">Single threshold value. Applied to selected channels and coincidence partner.</div>
+      <div class="row"><span class="lbl">Coincidence channel</span><input id="coincidence_channel" class="box" type="number" min="0" max="63"></div>
+      <div class="hint">Current hardware coincidence path is 2-channel: primary + partner.</div>
+      <div class="row"><span class="lbl">Software trigger rate [Hz]</span><input id="sw_trigger_hz" class="box" type="number" min="0" step="1"></div>
+      <div class="row"><span class="lbl">Auto stop mode</span>
+        <select id="auto_stop_mode" class="box">
+          <option value="0">None</option>
+          <option value="1">Duration (seconds)</option>
+          <option value="2">Event count (decoded)</option>
+        </select>
+      </div>
+      <div class="row"><span class="lbl">Run duration [s]</span><input id="run_duration_s" class="box" type="number" min="0" step="1"></div>
+      <div class="row"><span class="lbl">Target decoded event count</span><input id="target_event_count" class="box" type="number" min="0" step="1"></div>
+      <div class="hint">Set either duration or target event count (not both). Mode enforces exclusivity.</div>
+      <div class="row">
+        <button class="mbutton" onclick="applyConfig()">Apply to ODB</button>
+        <button class="mbutton" onclick="refreshConfig()">Reload from ODB</button>
+        <button class="mbutton" onclick="mhttpd_start_run()">Start</button>
+        <button class="mbutton" onclick="mhttpd_stop_run()">Stop</button>
+      </div>
+      <div class="row"><span class="lbl">Apply status</span><span id="ui_status" class="mono"></span></div>
+      <div class="row"><span class="lbl">Apply error</span><span id="ui_error" class="mono"></span></div>
+      <div class="row"><span class="lbl">Help</span><span id="help_text" class="mono"></span></div>
+      <div class="row"><span class="lbl">Notes</span><span class="mono">You can set different thresholds per channel by selecting channels and re-applying values iteratively.</span></div>
+    </td></tr>
+  </table>
+
+  <table class="mtable">
+    <tr><th class="mtableheader">Run Live Status</th></tr>
+    <tr><td>
+      <div class="row"><span class="lbl">Run number</span><span id="run_number" class="mono"></span></div>
+      <div class="row"><span class="lbl">Run state</span><span id="run_state" class="mono"></span></div>
+      <div class="row"><span class="lbl">Events sent</span><span id="events_sent" class="mono"></span></div>
+      <div class="row"><span class="lbl">Events per sec</span><span id="events_per_sec" class="mono"></span></div>
+      <div class="row"><span class="lbl">kBytes per sec</span><span id="kbytes_per_sec" class="mono"></span></div>
+    </td></tr>
+  </table>
+
+  <table class="mtable">
+    <tr><th class="mtableheader">Last Run Summary</th></tr>
+    <tr><td>
+      <div class="row"><span class="lbl">Last run number</span><span id="sum_run_number" class="mono"></span></div>
+      <div class="row"><span class="lbl">Last run state</span><span id="sum_run_state" class="mono"></span></div>
+      <div class="row"><span class="lbl">Last events sent</span><span id="sum_events_sent" class="mono"></span></div>
+      <div class="row"><span class="lbl">Last elapsed [s]</span><span id="sum_elapsed_s" class="mono"></span></div>
+      <div class="row"><span class="lbl">Last rate [Hz]</span><span id="sum_rate_hz" class="mono"></span></div>
+      <div class="row"><span class="lbl">Channels</span><span id="sum_channels" class="mono"></span></div>
+      <div class="row"><span class="lbl">Threshold [V]</span><span id="sum_threshold_v" class="mono"></span></div>
+      <div class="row"><span class="lbl">Mode / edge</span><span id="sum_mode_edge" class="mono"></span></div>
+      <div class="row"><span class="lbl">Auto-stop</span><span id="sum_autostop" class="mono"></span></div>
+      <div class="row"><span class="lbl">Last run file</span><span id="sum_last_file" class="mono"></span></div>
+    </td></tr>
+  </table>
+
+  <table class="mtable">
+    <tr><th class="mtableheader">Download Last Run To Remote</th></tr>
+    <tr><td>
+      <div class="row"><span class="lbl">Remote user@host</span><input id="remote_host" class="wide" type="text" placeholder="user@remote-host"></div>
+      <div class="row"><span class="lbl">Remote destination dir</span><input id="remote_dir" class="wide" type="text" placeholder="/path/on/remote/device"></div>
+      <div class="row">
+        <button class="mbutton" onclick="buildScpCommand()">Build transfer command</button>
+      </div>
+      <div class="row"><span class="lbl">Command</span><span id="download_cmd" class="mono"></span></div>
+      <div class="hint">Run this command in a terminal on the WaveCatcher host to copy the last run file to your remote device.</div>
+    </td></tr>
+  </table>
+
+  <table class="mtable">
+    <tr><th class="mtableheader">Live Waveform Preview</th></tr>
+    <tr><td>
+      <div class="row"><span class="lbl">Preview channel</span><span id="preview_channel" class="mono"></span></div>
+      <div class="row"><span class="lbl">Overlay channels</span><span id="preview_channels_csv" class="mono"></span></div>
+      <div class="row"><span class="lbl">Samples shown</span><span id="preview_samples" class="mono"></span></div>
+      <div class="row"><span class="lbl">Updated (ms)</span><span id="preview_updated_ms" class="mono"></span></div>
+      <div class="row"><span class="lbl">Legend</span><span id="wf_legend" class="mono"></span></div>
+      <div class="row"><canvas id="wf_canvas" width="900" height="240"></canvas></div>
+    </td></tr>
+  </table>
+</div>
+
+<script>
+const PATHS = [
+  "/Equipment/WaveCatcher/Variables/trigger_mode",
+  "/Equipment/WaveCatcher/Variables/trigger_edge",
+  "/Equipment/WaveCatcher/Variables/enabled_channel",
+  "/Equipment/WaveCatcher/Variables/enabled_channels_csv",
+  "/Equipment/WaveCatcher/Variables/trigger_threshold_v",
+  "/Equipment/WaveCatcher/Variables/coincidence_channel",
+  "/Equipment/WaveCatcher/Variables/coincidence_threshold_v",
+  "/Equipment/WaveCatcher/Variables/sw_trigger_hz",
+  "/Equipment/WaveCatcher/Variables/auto_stop_mode",
+  "/Equipment/WaveCatcher/Variables/run_duration_s",
+  "/Equipment/WaveCatcher/Variables/target_event_count",
+  "/Equipment/WaveCatcher/Variables/ui_last_apply_status",
+  "/Equipment/WaveCatcher/Variables/ui_last_apply_error",
+  "/Equipment/WaveCatcher/Variables/help",
+  "/Runinfo/Run number",
+  "/Runinfo/State",
+  "/Equipment/WaveCatcher/Statistics/Events sent",
+  "/Equipment/WaveCatcher/Statistics/Events per sec.",
+  "/Equipment/WaveCatcher/Statistics/kBytes per sec.",
+  "/Equipment/WaveCatcher/RunSummary/run_number",
+  "/Equipment/WaveCatcher/RunSummary/run_state",
+  "/Equipment/WaveCatcher/RunSummary/events_sent",
+  "/Equipment/WaveCatcher/RunSummary/elapsed_s",
+  "/Equipment/WaveCatcher/RunSummary/event_rate_hz",
+  "/Equipment/WaveCatcher/RunSummary/enabled_channels_csv",
+  "/Equipment/WaveCatcher/RunSummary/trigger_threshold_v",
+  "/Equipment/WaveCatcher/RunSummary/trigger_mode",
+  "/Equipment/WaveCatcher/RunSummary/trigger_edge",
+  "/Equipment/WaveCatcher/RunSummary/auto_stop_mode",
+  "/Equipment/WaveCatcher/RunSummary/run_duration_s",
+  "/Equipment/WaveCatcher/RunSummary/target_event_count",
+  "/Equipment/WaveCatcher/RunSummary/last_run_file",
+  "/Equipment/WaveCatcher/Live/preview_channel",
+  "/Equipment/WaveCatcher/Live/preview_waveform_csv",
+  "/Equipment/WaveCatcher/Live/preview_samples",
+  "/Equipment/WaveCatcher/Live/preview_updated_ms",
+  "/Equipment/WaveCatcher/Live/preview_channels_csv",
+  "/Equipment/WaveCatcher/Live/preview_waveforms_encoded"
+];
+
+function setText(id, v) { document.getElementById(id).textContent = (v === undefined || v === null) ? "" : String(v); }
+
+function stateName(s) {
+  if (s === 1) return "Stopped";
+  if (s === 2) return "Paused";
+  if (s === 3) return "Running";
+  return String(s);
+}
+
+function triggerModeName(m) {
+  if (Number(m) === 0) return "normal";
+  if (Number(m) === 1) return "software";
+  if (Number(m) === 2) return "coincidence";
+  return String(m);
+}
+
+function edgeName(e) {
+  return Number(e) === 0 ? "positive" : "negative";
+}
+
+function autoStopName(m, dur, target) {
+  if (Number(m) === 1) return `duration (${dur}s)`;
+  if (Number(m) === 2) return `event_count (${target})`;
+  return "none";
+}
+
+function waveformColors() {
+  return ["#0b5", "#d44", "#36c", "#e67e22", "#8e44ad", "#16a085", "#7f8c8d", "#c0392b"];
+}
+
+function parseOverlay(encoded) {
+  const out = [];
+  if (!encoded) return out;
+  const parts = String(encoded).split(";");
+  for (const part of parts) {
+    if (!part) continue;
+    const p = part.indexOf("|");
+    if (p < 0) continue;
+    const ch = Number(part.slice(0, p));
+    const vals = part.slice(p + 1).split(",").map(v => Number(v)).filter(v => Number.isFinite(v));
+    if (!Number.isFinite(ch) || vals.length < 2) continue;
+    out.push({ ch, vals });
+  }
+  return out;
+}
+
+function drawWave(overlayEncoded, fallbackCsv) {
+  const c = document.getElementById("wf_canvas");
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, c.width, c.height);
+  let traces = parseOverlay(overlayEncoded);
+  if (traces.length === 0 && fallbackCsv) {
+    const vals = String(fallbackCsv).split(",").map(v => Number(v)).filter(v => Number.isFinite(v));
+    if (vals.length >= 2) traces = [{ ch: "single", vals }];
+  }
+  if (traces.length === 0) {
+    setText("wf_legend", "");
+    return;
+  }
+  let vmin = traces[0].vals[0], vmax = traces[0].vals[0];
+  for (const t of traces) {
+    for (const v of t.vals) { if (v < vmin) vmin = v; if (v > vmax) vmax = v; }
+  }
+  if (vmax === vmin) { vmax += 1; vmin -= 1; }
+  const w = c.width, h = c.height, px = 30, py = 15;
+  ctx.strokeStyle = "#444";
+  ctx.beginPath();
+  ctx.moveTo(px, h - py);
+  ctx.lineTo(w - px, h - py);
+  ctx.moveTo(px, py);
+  ctx.lineTo(px, h - py);
+  ctx.stroke();
+  const colors = waveformColors();
+  const legend = [];
+  traces.forEach((t, idx) => {
+    const col = colors[idx % colors.length];
+    ctx.strokeStyle = col;
+    ctx.beginPath();
+    for (let i = 0; i < t.vals.length; i++) {
+      const x = px + (i * (w - 2 * px)) / (t.vals.length - 1);
+      const y = py + (vmax - t.vals[i]) * (h - 2 * py) / (vmax - vmin);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    legend.push(`ch${t.ch}:${col}`);
+  });
+  setText("wf_legend", legend.join("  "));
+}
+
+function readUi(data) {
+  document.getElementById("trigger_mode").value = String(data[0]);
+  document.getElementById("trigger_edge").value = String(data[1]);
+  document.getElementById("enabled_channel").value = data[2];
+  document.getElementById("enabled_channels_csv").value = data[3] || "";
+  document.getElementById("trigger_threshold_v").value = data[4];
+  document.getElementById("coincidence_channel").value = data[5];
+  document.getElementById("coincidence_threshold_v").value = data[6];
+  document.getElementById("sw_trigger_hz").value = data[7];
+  document.getElementById("auto_stop_mode").value = String(data[8]);
+  document.getElementById("run_duration_s").value = data[9];
+  document.getElementById("target_event_count").value = data[10];
+  setText("ui_status", data[11]);
+  setText("ui_error", data[12]);
+  setText("help_text", data[13]);
+  setText("run_number", data[14]);
+  setText("run_state", stateName(data[15]));
+  setText("events_sent", data[16]);
+  setText("events_per_sec", data[17]);
+  setText("kbytes_per_sec", data[18]);
+  setText("sum_run_number", data[19]);
+  setText("sum_run_state", data[20]);
+  setText("sum_events_sent", data[21]);
+  setText("sum_elapsed_s", data[22]);
+  setText("sum_rate_hz", data[23]);
+  setText("sum_channels", data[24]);
+  setText("sum_threshold_v", data[25]);
+  setText("sum_mode_edge", `${triggerModeName(data[26])} / ${edgeName(data[27])}`);
+  setText("sum_autostop", autoStopName(data[28], data[29], data[30]));
+  setText("sum_last_file", data[31]);
+  setText("preview_channel", data[32]);
+  setText("preview_samples", data[34]);
+  setText("preview_updated_ms", data[35]);
+  setText("preview_channels_csv", data[36] || "");
+  drawWave(data[37] || "", data[33] || "");
+}
+
+function refreshConfig() {
+  mjsonrpc_db_get_values(PATHS).then(rpc => readUi(rpc.result.data)).catch(mjsonrpc_error_alert);
+}
+
+function buildScpCommand() {
+  const host = (document.getElementById("remote_host").value || "").trim();
+  const dst = (document.getElementById("remote_dir").value || "").trim();
+  const src = (document.getElementById("sum_last_file").textContent || "").trim();
+  if (!host || !dst || !src || src === "n/a") {
+    setText("download_cmd", "Please fill remote host, destination dir, and ensure a last run file exists.");
+    return;
+  }
+  setText("download_cmd", `scp '${src}' '${host}:${dst}/'`);
+}
+
+function applyConfig() {
+  const mode = parseInt(document.getElementById("auto_stop_mode").value, 10);
+  let duration = parseInt(document.getElementById("run_duration_s").value || "0", 10);
+  let target = parseInt(document.getElementById("target_event_count").value || "0", 10);
+  if (mode === 1) {
+    target = 0;
+  } else if (mode === 2) {
+    duration = 0;
+  } else {
+    duration = 0;
+    target = 0;
+  }
+  const values = [
+    parseInt(document.getElementById("trigger_mode").value, 10),
+    parseInt(document.getElementById("trigger_edge").value, 10),
+    parseInt(document.getElementById("enabled_channel").value || "0", 10),
+    document.getElementById("enabled_channels_csv").value.trim(),
+    parseFloat(document.getElementById("trigger_threshold_v").value || "0"),
+    parseInt(document.getElementById("coincidence_channel").value || "0", 10),
+    parseFloat(document.getElementById("trigger_threshold_v").value || "0"),
+    parseInt(document.getElementById("sw_trigger_hz").value || "0", 10),
+    mode,
+    duration,
+    target
+  ];
+  const writePaths = PATHS.slice(0, 11);
+  const extraPaths = [
+    "/Equipment/WaveCatcher/Variables/apply_threshold_to_selected",
+    "/Equipment/WaveCatcher/Variables/selected_threshold_v"
+  ];
+  const thr = parseFloat(document.getElementById("trigger_threshold_v").value || "0");
+  const extraVals = [true, thr];
+  document.getElementById("run_duration_s").value = duration;
+  document.getElementById("target_event_count").value = target;
+  mjsonrpc_db_paste(writePaths, values).then(() => refreshConfig()).catch(mjsonrpc_error_alert);
+  mjsonrpc_db_paste(extraPaths, extraVals).catch(mjsonrpc_error_alert);
+}
+
+function initPage() {
+  mhttpd_init("WaveCatcher Control");
+  refreshConfig();
+  window.setInterval(refreshConfig, 2000);
+}
+</script>
+</body>
+</html>

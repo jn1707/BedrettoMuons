@@ -1,0 +1,41 @@
+# Runtime/shared-memory artifacts
+*.SHM
+.SHM_*
+.SYSMSG.SHM
+.SYSTEM.SHM
+.MSG.SHM
+.ODB.SHM
+.ELOG.SHM
+.HISTORY.SHM
+.ALARM.SHM
+
+# MIDAS run data and checksums
+run*.mid
+run*.mid.*
+*.crc32c
+runlogs/
+
+# Logs and transient state
+*.log
+last.json
+odb_ls.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Binaries/build outputs
+*.o
+*.a
+*.so
+*.out
+wc_test_harness
+wc_api_smoke_test
+wc_midas_frontend
+
+# Local experiment/runtime config
+exptab
+midas.log
+mserver.log
+mlogger.log
+mhttpd.log
