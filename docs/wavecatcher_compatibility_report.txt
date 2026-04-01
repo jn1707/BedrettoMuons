@@ -515,3 +515,59 @@ Update: guided mhttpd control enhancements (2026-03-31)
 Build/validation notes:
 - `~/online_wc/midas_frontend` rebuilt successfully after these changes (`make`).
 - ODB keys for live/summary are created by frontend init/runtime and become visible once `wc_midas_frontend` is running in the experiment.
+
+Update: MIDAS BOR transition diagnosis and mitigation (2026-04-01)
+- User-visible symptom:
+  - MIDAS stack starts, but START can fail with:
+    - `previous transition did not finish yet`
+    - `cm_transition status 603` from WaveCatcher frontend
+  - Runs then do not record events.
+
+Confirmed root cause:
+- `WAVECAT64CH_OpenDevice()` can block unpredictably inside FTDI/libusb internals.
+- When this call happens in BOR transition context (`begin_of_run` / `rc_transition`),
+  MIDAS transition RPC can stall and leave apparent stuck transition state.
+
+Implemented fix in native frontend (`midas_frontend/wc_midas_frontend.cxx`):
+1) Remove device open from BOR path:
+   - BOR no longer calls `OpenDevice`.
+2) Async open worker at frontend startup:
+   - device open now runs outside transition callback.
+3) Explicit readiness state exposed in ODB:
+   - `/Equipment/WaveCatcher/Variables/device_open_state`
+   - `/Equipment/WaveCatcher/Variables/device_open_state_str`
+   - States: `0 idle, 1 in_progress, 2 ready, 3 failed, 4 timed_out`
+4) Open timeout guard:
+   - `in_progress` promoted to `timed_out` after 180 s.
+5) BOR behavior:
+   - fast-fail with explicit message when device not ready, instead of hanging transition.
+6) Runtime stability patch:
+   - throttled readiness ODB publishing + idle sleep to avoid frontend CPU spin while idle.
+
+Operational mitigations in CLI/start scripts:
+- `scripts/wc_run_midas_cli.sh`:
+  - added `--start-retries N`
+  - waits for `device_open_state==2` before START
+  - skips START when hardware is not ready (avoids transition churn)
+  - clears stale `/Runinfo/Transition in progress`
+  - can restart frontend between retries to retrigger async open
+- `scripts/wc_start_midas_stack.sh`:
+  - staged timeout profile and hardware preflight retained
+  - stale transition lock clear retained
+
+Interpretation:
+- This converts failure mode from transition deadlock to bounded readiness gating.
+- If hardware open is slow/fails, operators get explicit readiness status and retry path
+  without wedging MIDAS transition control flow.
+
+Debugging artifacts added in repo:
+- `docs/MIDAS_BOR_DEBUGGING.md`
+- `scripts/wc_check_bor_health.sh`
+
+Recommended debug sequence:
+1) Start stack:
+   - `scripts/wc_start_midas_stack.sh`
+2) Inspect BOR/readiness health:
+   - `scripts/wc_check_bor_health.sh`
+3) Run with retry-gated START:
+   - `scripts/wc_run_midas_cli.sh --duration 10 --triggermode normal --edge pos --threshold 0.020 --channels 0 --start-retries 3`

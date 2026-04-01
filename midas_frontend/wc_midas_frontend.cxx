@@ -7,6 +7,7 @@
 #include <string>
 #include <sstream>
 #include <algorithm>
+#include <thread>
 
 #include "midas.h"
 #include "mfe.h"
@@ -34,6 +35,13 @@ INT interrupt_configure(INT cmd, INT source, POINTER_T adr);
 
 static bool g_run_active = false;
 static bool g_device_open = false;
+static bool g_device_open_attempted = false;
+static bool g_device_open_thread_started = false;
+static int g_device_open_state = 0; /* 0=idle, 1=in_progress, 2=ready, 3=failed, 4=timed_out */
+static DWORD g_device_open_start_ms = 0;
+static DWORD g_device_open_timeout_ms = 180000; /* 3 min */
+static int g_last_reported_device_open_state = -1;
+static DWORD g_last_device_state_odb_ms = 0;
 static bool g_evt_allocated = false;
 static WAVECAT64CH_EventStruct g_evt {};
 
@@ -71,6 +79,33 @@ static DWORD g_run_start_ms = 0;
 static bool g_stop_transition_requested = false;
 static bool g_shutdown_requested = false;
 static DWORD g_last_live_update_ms = 0;
+
+static void wc_set_device_open_state_odb()
+{
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_open_state",
+                &g_device_open_state, sizeof(g_device_open_state), 1, TID_INT);
+   const char *state_str = "idle";
+   if (g_device_open_state == 1) state_str = "in_progress";
+   else if (g_device_open_state == 2) state_str = "ready";
+   else if (g_device_open_state == 3) state_str = "failed";
+   else if (g_device_open_state == 4) state_str = "timed_out";
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_open_state_str",
+                state_str, (INT)strlen(state_str) + 1, 1, TID_STRING);
+}
+
+static void wc_publish_device_state_if_needed(bool force = false)
+{
+   DWORD now = ss_millitime();
+   if (force || g_device_open_state != g_last_reported_device_open_state ||
+       (now - g_last_device_state_odb_ms) > 1000) {
+      wc_set_device_open_state_odb();
+      g_last_reported_device_open_state = g_device_open_state;
+      g_last_device_state_odb_ms = now;
+   }
+}
+
+
+static int wc_check(WAVECAT64CH_ErrCode code, const char *where);
 
 static void wc_set_run_summary_value(const char *name, const void *data, INT size, INT tid)
 {
@@ -147,8 +182,12 @@ static void ensure_odb_schema_defaults()
       "selected_threshold_v=bulk threshold for enabled_channels_csv if apply_threshold_to_selected=true | "
       "coincidence_threshold_v=partner threshold | "
       "auto_stop_mode: 0=none 1=duration(run_duration_s) 2=event_count(target_event_count)";
-   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/help",
-                help, (INT)strlen(help) + 1, 1, TID_STRING);
+    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/help",
+                 help, (INT)strlen(help) + 1, 1, TID_STRING);
+    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_open_state",
+                 &g_device_open_state, sizeof(g_device_open_state), 1, TID_INT);
+    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_open_state_str",
+                 "idle", 5, 1, TID_STRING);
 
    const char *none = "n/a";
    INT i0 = 0;
@@ -354,47 +393,40 @@ static INT wc_device_open_once()
       return SUCCESS;
    }
 
+   INT st = FE_ERR_DRIVER;
    int handle = -1;
-   INT st = wc_check(WAVECAT64CH_OpenDevice(&handle), "OpenDevice");
+   for (int attempt = 1; attempt <= 6; ++attempt) {
+      cm_msg(MINFO, "WaveCatcher", "OpenDevice attempt=%d", attempt);
+      handle = -1;
+      st = wc_check(WAVECAT64CH_OpenDevice(&handle), "OpenDevice");
+      if (st == SUCCESS) {
+         g_device_open = true;
+         break;
+      }
+      ss_sleep(200);
+   }
    if (st != SUCCESS) return st;
-   g_device_open = true;
 
    st = wc_check(WAVECAT64CH_ResetDevice(), "ResetDevice");
    if (st != SUCCESS) return st;
    st = wc_check(WAVECAT64CH_SetDefaultParameters(), "SetDefaultParameters");
    if (st != SUCCESS) return st;
 
-   memset(&g_evt, 0, sizeof(g_evt));
-   st = wc_check(WAVECAT64CH_AllocateEventStructure(&g_evt), "AllocateEventStructure");
-   if (st != SUCCESS) return st;
-   g_evt_allocated = true;
-
    return SUCCESS;
 }
 
-static INT wc_force_idle_reset()
+static void wc_device_open_worker()
 {
-   /* Ensure board is in a clean idle baseline before applying run settings. */
-   if (g_run_active) {
-      WAVECAT64CH_StopRun();
+   g_device_open_state = 1;
+   g_device_open_start_ms = ss_millitime();
+   wc_publish_device_state_if_needed(true);
+   INT st = wc_device_open_once();
+   if (st == SUCCESS) {
+      g_device_open_state = 2;
+   } else {
+      g_device_open_state = 3;
    }
-   g_run_active = false;
-   g_event_in_buffer = false;
-
-   INT st = wc_check(WAVECAT64CH_ResetDevice(), "ResetDevice(BOR)");
-   if (st != SUCCESS) return st;
-   st = wc_check(WAVECAT64CH_SetDefaultParameters(), "SetDefaultParameters(BOR)");
-   if (st != SUCCESS) return st;
-
-   if (g_evt_allocated) {
-      WAVECAT64CH_FreeEventStructure(&g_evt);
-      g_evt_allocated = false;
-   }
-   memset(&g_evt, 0, sizeof(g_evt));
-   st = wc_check(WAVECAT64CH_AllocateEventStructure(&g_evt), "AllocateEventStructure(BOR)");
-   if (st != SUCCESS) return st;
-   g_evt_allocated = true;
-   return SUCCESS;
+   wc_publish_device_state_if_needed(true);
 }
 
 static INT wc_apply_run_configuration()
@@ -510,14 +542,12 @@ static INT wc_apply_run_configuration()
       return st;
    }
 
-   WAVECAT64CH_SamplingFrequencyType actual_sf = WAVECAT64CH_3_2GHZ;
-   WAVECAT64CH_GetSamplingFrequency(&actual_sf);
     cm_msg(MINFO, "WaveCatcher",
-           "BOR settings: ch=%d csv=%s thr=%.3f selected_thr=%.3f apply_selected=%d edge=%d mode=%d odb_mode=%d sw_trigger_hz=%d coinc_ch=%d coinc_thr=%.3f sf_req=%d sf_actual=%d duration_s=%d auto_stop_mode=%d target_events=%d compat=minimal-v288",
+           "BOR settings: ch=%d csv=%s thr=%.3f selected_thr=%.3f apply_selected=%d edge=%d mode=%d odb_mode=%d sw_trigger_hz=%d coinc_ch=%d coinc_thr=%.3f duration_s=%d auto_stop_mode=%d target_events=%d compat=minimal-v288",
            g_enabled_channel, g_enabled_channels_csv.c_str(), g_trigger_threshold_v, g_selected_threshold_v, (int)g_apply_threshold_to_selected,
-           (int)g_trigger_edge, (int)trig_mode, g_trigger_mode_odb, g_sw_trigger_hz,
+            (int)g_trigger_edge, (int)trig_mode, g_trigger_mode_odb, g_sw_trigger_hz,
            g_coincidence_channel, g_coincidence_threshold_v,
-           g_sampling_frequency_mhz, (int)actual_sf, g_run_duration_s, g_auto_stop_mode, g_target_event_count);
+           g_run_duration_s, g_auto_stop_mode, g_target_event_count);
    wc_set_ui_status("applied", "");
    return SUCCESS;
 }
@@ -526,7 +556,7 @@ static void wc_stop_close()
 {
    if (g_run_active || g_device_open) {
       WAVECAT64CH_ErrCode ec = WAVECAT64CH_StopRun();
-      if (ec != WAVECAT64CH_Success && ec != WAVECAT64CH_FunctionNotCompatibleWithSystem) {
+      if (ec != WAVECAT64CH_Success) {
          cm_msg(MINFO, "WaveCatcher", "StopRun during cleanup returned %d", (int)ec);
       }
    }
@@ -574,7 +604,14 @@ INT frontend_init(void)
 {
    ensure_odb_schema_defaults();
    load_settings_from_odb();
-   cm_msg(MINFO, "WaveCatcher", "Frontend initialized (device will open/reset at BOR)");
+   cm_msg(MINFO, "WaveCatcher", "Frontend initialized (device opens asynchronously outside BOR)");
+   if (!g_device_open_thread_started) {
+      g_device_open_thread_started = true;
+      g_device_open_attempted = true;
+      cm_msg(MINFO, "WaveCatcher", "Starting async device open worker");
+      std::thread(wc_device_open_worker).detach();
+   }
+   wc_publish_device_state_if_needed(true);
    return SUCCESS;
 }
 
@@ -589,34 +626,58 @@ INT frontend_exit(void)
 INT begin_of_run(INT run_number, char *error)
 {
    cm_msg(MINFO, "WaveCatcher", "begin_of_run enter run=%d", run_number);
+   DWORD bor_t0 = ss_millitime();
+   DWORD t_cfg_ms = 0, t_alloc_ms = 0, t_start_ms = 0;
    g_poll_calls = g_poll_hits = g_decode_calls = g_decode_hits = 0;
    g_poll_incomplete = g_poll_no_event = g_poll_other_err = 0;
    g_wave_nan_only = g_wave_channels_written = g_wave_size_zero = g_wave_ptr_null = 0;
-   INT st = wc_device_open_once();
-   if (st != SUCCESS) {
-      snprintf(error, 256, "WaveCatcher open failed");
-      cm_msg(MERROR, "WaveCatcher", "begin_of_run open failed run=%d status=%d", run_number, st);
-      return st;
-   }
+   memset(&g_evt, 0, sizeof(g_evt));
 
-   st = wc_force_idle_reset();
-   if (st != SUCCESS) {
-      snprintf(error, 256, "WaveCatcher reset/default failed");
-      cm_msg(MERROR, "WaveCatcher", "begin_of_run reset failed run=%d status=%d", run_number, st);
-      return st;
+   /* Device must be opened by async worker before BOR starts. */
+   if (!g_device_open) {
+      if (g_device_open_state == 1) {
+         snprintf(error, 256, "Device open still in progress; retry START in ~10-30s");
+         cm_msg(MERROR, "WaveCatcher", "begin_of_run: device open still in progress for run=%d", run_number);
+      } else if (g_device_open_state == 4) {
+         snprintf(error, 256, "Device open timed out; restart frontend or power-cycle hardware");
+         cm_msg(MERROR, "WaveCatcher", "begin_of_run: device open timed out for run=%d", run_number);
+      } else if (g_device_open_state == 3) {
+         snprintf(error, 256, "Device open failed in async worker; restart frontend/hardware");
+         cm_msg(MERROR, "WaveCatcher", "begin_of_run: device open previously failed for run=%d", run_number);
+      } else {
+         snprintf(error, 256, "Device open not started; frontend init issue");
+         cm_msg(MERROR, "WaveCatcher", "begin_of_run: device open state invalid (%d) run=%d", g_device_open_state, run_number);
+      }
+      return FE_ERR_HW;
    }
+   
+   cm_msg(MINFO, "WaveCatcher", "begin_of_run: device already open, proceeding with configuration");
 
-   st = wc_apply_run_configuration();
+   INT st = wc_apply_run_configuration();
+   t_cfg_ms = ss_millitime() - bor_t0;
    if (st != SUCCESS) {
       snprintf(error, 256, "WaveCatcher init failed");
-      cm_msg(MERROR, "WaveCatcher", "begin_of_run failed run=%d status=%d", run_number, st);
+      cm_msg(MERROR, "WaveCatcher", "begin_of_run failed run=%d status=%d t_cfg_ms=%u",
+             run_number, st, (unsigned)t_cfg_ms);
       return st;
    }
 
+   st = wc_check(WAVECAT64CH_AllocateEventStructure(&g_evt), "AllocateEventStructure");
+   t_alloc_ms = ss_millitime() - bor_t0;
+   if (st != SUCCESS) {
+      snprintf(error, 256, "WaveCatcher event allocation failed");
+      cm_msg(MERROR, "WaveCatcher", "begin_of_run allocation failed run=%d status=%d t_cfg_ms=%u t_alloc_ms=%u",
+             run_number, st, (unsigned)t_cfg_ms, (unsigned)t_alloc_ms);
+      return st;
+   }
+   g_evt_allocated = true;
+
    st = wc_check(WAVECAT64CH_StartRun(), "StartRun");
+   t_start_ms = ss_millitime() - bor_t0;
    if (st != SUCCESS) {
       snprintf(error, 256, "WaveCatcher start run failed");
-      cm_msg(MERROR, "WaveCatcher", "begin_of_run start failed run=%d status=%d", run_number, st);
+      cm_msg(MERROR, "WaveCatcher", "begin_of_run start failed run=%d status=%d t_cfg_ms=%u t_alloc_ms=%u t_start_ms=%u",
+             run_number, st, (unsigned)t_cfg_ms, (unsigned)t_alloc_ms, (unsigned)t_start_ms);
       return st;
    }
 
@@ -628,7 +689,9 @@ INT begin_of_run(INT run_number, char *error)
    g_last_live_update_ms = 0;
    wc_set_run_summary_value("run_number", &run_number, sizeof(run_number), TID_INT);
    wc_set_run_summary_value("run_state", "running", 8, TID_STRING);
-   cm_msg(MINFO, "WaveCatcher", "Run %d started", run_number);
+   cm_msg(MINFO, "WaveCatcher", "Run %d started (BOR timings ms: cfg=%u alloc=%u start=%u total=%u)",
+          run_number, (unsigned)t_cfg_ms, (unsigned)(t_alloc_ms - t_cfg_ms),
+          (unsigned)(t_start_ms - t_alloc_ms), (unsigned)t_start_ms);
    cm_msg(MINFO, "WaveCatcher", "begin_of_run exit run=%d", run_number);
    return SUCCESS;
 }
@@ -636,7 +699,7 @@ INT begin_of_run(INT run_number, char *error)
 INT end_of_run(INT run_number, char *error)
 {
    (void)error;
-   g_shutdown_requested = true;
+   g_shutdown_requested = false;
    cm_msg(MINFO, "WaveCatcher", "end_of_run enter run=%d", run_number);
    g_run_active = false;
    g_stop_transition_requested = false;
@@ -654,7 +717,15 @@ INT end_of_run(INT run_number, char *error)
    wc_set_live_value("preview_waveforms_encoded", "", 1, TID_STRING);
    wc_set_live_value("preview_samples", &i0, sizeof(i0), TID_INT);
    wc_set_live_value("preview_updated_ms", &i0, sizeof(i0), TID_INT);
-   wc_stop_close();
+   /* keep device open between runs to reduce open/close churn */
+   if (g_run_active || g_device_open) {
+      WAVECAT64CH_ErrCode ec = WAVECAT64CH_StopRun();
+      if (ec != WAVECAT64CH_Success) {
+         cm_msg(MINFO, "WaveCatcher", "StopRun at EOR returned %d", (int)ec);
+      }
+   }
+   g_run_active = false;
+   g_event_in_buffer = false;
    cm_msg(MINFO, "WaveCatcher", "Run %d stopped", run_number);
    cm_msg(MINFO, "WaveCatcher", "end_of_run exit run=%d", run_number);
    return SUCCESS;
@@ -676,6 +747,23 @@ INT resume_run(INT run_number, char *error)
 
 INT frontend_loop(void)
 {
+   /* Fallback: if async worker was not started for any reason, start it here without blocking. */
+   if (!g_device_open_thread_started && !g_device_open_attempted) {
+      g_device_open_thread_started = true;
+      g_device_open_attempted = true;
+      cm_msg(MINFO, "WaveCatcher", "frontend_loop: starting fallback async device open worker");
+      std::thread(wc_device_open_worker).detach();
+   }
+   if (g_device_open_state == 1 && g_device_open_start_ms > 0) {
+      DWORD elapsed = ss_millitime() - g_device_open_start_ms;
+      if (elapsed > g_device_open_timeout_ms) {
+         g_device_open_state = 4;
+         wc_publish_device_state_if_needed(true);
+         cm_msg(MERROR, "WaveCatcher", "device open timed out after %u ms; restart frontend/hardware", (unsigned)elapsed);
+      }
+   }
+   wc_publish_device_state_if_needed(false);
+   
    if (g_run_active && !g_stop_transition_requested) {
       bool request_stop = false;
       std::string reason;
@@ -725,6 +813,10 @@ INT frontend_loop(void)
    }
    if (g_shutdown_requested) {
       wc_stop_close();
+   }
+   /* Avoid busy-spin when idle while async open is in progress/fails. */
+   if (!g_run_active) {
+      ss_sleep(10);
    }
    return SUCCESS;
 }

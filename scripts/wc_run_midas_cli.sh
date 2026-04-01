@@ -5,7 +5,7 @@ usage() {
   cat <<'EOF'
 Usage:
   wc_run_midas_cli.sh --duration SEC --triggermode normal|coincidence|software \
-    --edge pos|neg --threshold VOLT --channels CH or CH0,CH1 [--sw-hz HZ] [--coinc-threshold VOLT]
+    --edge pos|neg --threshold VOLT --channels CH or CH0,CH1 [--sw-hz HZ] [--coinc-threshold VOLT] [--start-retries N]
 
 Examples:
   wc_run_midas_cli.sh --duration 10 --triggermode normal --edge pos --threshold 0.050 --channels 0
@@ -21,6 +21,7 @@ THRESHOLD=""
 CHANNELS=""
 SW_HZ="20"
 COINC_THR=""
+START_RETRIES="3"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,6 +32,7 @@ while [[ $# -gt 0 ]]; do
     --channels) CHANNELS="$2"; shift 2 ;;
     --sw-hz) SW_HZ="$2"; shift 2 ;;
     --coinc-threshold) COINC_THR="$2"; shift 2 ;;
+    --start-retries) START_RETRIES="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -69,6 +71,14 @@ export MIDAS_EXPTAB=/home/morenoma/online_wc/exptab
 export MIDAS_EXPT_NAME=wavecatcher
 export MIDAS_DIR=/home/morenoma/online_wc
 export PATH="$MIDASSYS/bin:$PATH"
+WC_WD_RUNTIME_MS="${WC_WD_RUNTIME_MS:-120000}"
+WC_TR_CONNECT_RUNTIME_MS="${WC_TR_CONNECT_RUNTIME_MS:-120000}"
+WC_TR_TOTAL_RUNTIME_MS="${WC_TR_TOTAL_RUNTIME_MS:-180000}"
+WC_CLI_RESTART_STACK="${WC_CLI_RESTART_STACK:-0}"
+
+if [[ "${WC_CLI_RESTART_STACK}" == "1" ]] && [[ -x /home/morenoma/Documents/wc_start_midas_stack.sh ]]; then
+  /home/morenoma/Documents/wc_start_midas_stack.sh >/dev/null
+fi
 
 OUT_BASE="/home/morenoma/Documents/wc_midas_phase1_v2/cli_runs"
 mkdir -p "$OUT_BASE"
@@ -92,7 +102,88 @@ ensure_frontend_running() {
   fi
 }
 
+clear_stale_transition_lock() {
+  local tip
+  tip="$(odbedit -e wavecatcher -c "ls '/Runinfo/Transition in progress'" 2>/dev/null | awk '/^Transition in progress/ {print $NF; exit}' || true)"
+  if [[ ! "${tip:-}" =~ ^[0-9]+$ ]]; then
+    tip=0
+  fi
+  if [[ "${tip:-0}" != "0" ]]; then
+    echo "Clearing stale '/Runinfo/Transition in progress'=${tip} ..."
+    odbedit -e wavecatcher -c "set '/Runinfo/Transition in progress' 0" >/dev/null 2>&1 || true
+    sleep 1
+  fi
+}
+
+get_run_state() {
+  odbedit -e wavecatcher -c "ls '/Runinfo/State'" 2>/dev/null | awk '/^State/ {print $NF; exit}'
+}
+
+get_device_open_state() {
+  odbedit -e wavecatcher -c "ls '/Equipment/WaveCatcher/Variables/device_open_state'" 2>/dev/null | awk '/^device_open_state/ {print $NF; exit}'
+}
+
+wait_for_device_ready() {
+  local wait_s="${1:-90}"
+  local waited=0
+  local st
+  while [[ "$waited" -lt "$wait_s" ]]; do
+    st="$(get_device_open_state || true)"
+    if [[ "${st:-}" == "2" ]]; then
+      echo "Device open state: ready"
+      return 0
+    fi
+    if [[ "${st:-}" == "3" || "${st:-}" == "4" ]]; then
+      echo "Device open state: failed/timed_out (${st:-})"
+      return 1
+    fi
+    if (( waited % 10 == 0 )); then
+      echo "Waiting for device readiness... state=${st:-unknown} waited=${waited}s"
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  echo "Timed out waiting for device readiness (last state=${st:-unknown})"
+  return 1
+}
+
+set_runtime_timeout_profile() {
+  odbedit -e wavecatcher -c "set '/Programs/WaveCatcher Frontend/Watchdog timeout' ${WC_WD_RUNTIME_MS}" >/dev/null 2>&1 || true
+  odbedit -e wavecatcher -c "set '/Experiment/Transition connect timeout' ${WC_TR_CONNECT_RUNTIME_MS}" >/dev/null 2>&1 || true
+  odbedit -e wavecatcher -c "set '/Experiment/Transition timeout' ${WC_TR_TOTAL_RUNTIME_MS}" >/dev/null 2>&1 || true
+}
+
+cooldown_before_retry() {
+  local attempt="$1"
+  echo "Cooldown before retry #${attempt}: STOP/clear/wait/probe..."
+  timeout 25 mtransition -e wavecatcher STOP >/tmp/wc_cli_retry_stop_${STAMP}_${attempt}.log 2>&1 || true
+  clear_stale_transition_lock
+  sleep 3
+  timeout 20 /home/morenoma/online_wc/midas_frontend/wc_test_harness >/tmp/wc_cli_retry_harness_${STAMP}_${attempt}.log 2>&1 || true
+  sleep 2
+}
+
+restart_frontend_only() {
+  local pid
+  pid="$(pgrep -f '/home/morenoma/online_wc/midas_frontend/wc_midas_frontend -D -e wavecatcher' | head -n 1 || true)"
+  if [[ -n "${pid}" ]]; then
+    echo "Restarting frontend PID ${pid} to retry device open..."
+    kill "${pid}" 2>/dev/null || true
+    sleep 2
+  fi
+  /home/morenoma/online_wc/midas_frontend/wc_midas_frontend -D -e wavecatcher > /home/morenoma/online_wc/wc_midas_frontend.log 2>&1
+  sleep 3
+}
+
 ensure_frontend_running
+
+echo "Priming hardware path (direct v288 preflight)..."
+if ! timeout 20 /home/morenoma/Documents/wc_run_v288.sh python3 -u /home/morenoma/Documents/wc_capture_waveforms_png.py \
+  --seconds 0.8 --threshold "$THRESHOLD" --edge "$EDGE" --accept-mv 5 --max-save 1 \
+  --output-dir "/tmp/wc_cli_preflight_${STAMP}" >/tmp/wc_cli_preflight.log 2>&1; then
+  echo "WARNING: preflight did not complete; MIDAS START may still timeout."
+  echo "Check /tmp/wc_cli_preflight.log"
+fi
 
 echo "Configuring ODB..."
 odbedit -e wavecatcher -c "set '/Equipment/WaveCatcher/Variables/trigger_mode' $MODE_INT" >/dev/null
@@ -114,9 +205,55 @@ else
 fi
 
 echo "Starting run..."
-mtransition -e wavecatcher START | tee "$OUT_DIR/start.txt"
+start_ok=0
+for attempt in $(seq 1 "$START_RETRIES"); do
+  clear_stale_transition_lock
+  if ! wait_for_device_ready 120; then
+    echo "Skipping START attempt ${attempt}: device not ready."
+    if [[ "$attempt" -lt "$START_RETRIES" ]]; then
+      restart_frontend_only
+      cooldown_before_retry "$attempt"
+      continue
+    fi
+    break
+  fi
+  clear_stale_transition_lock
+  echo "START attempt ${attempt}/${START_RETRIES}..."
+  PRE_STATE="$(get_run_state || true)"
+  if [[ "${PRE_STATE:-}" == "3" ]]; then
+    echo "Run already in RUNNING state before START; treating as started."
+    start_ok=1
+    break
+  fi
+  mtransition -e wavecatcher START | tee "$OUT_DIR/start_attempt_${attempt}.txt" || true
+  START_STATE="$(get_run_state || true)"
+  if [[ "${START_STATE:-}" == "3" ]]; then
+    cat "$OUT_DIR/start_attempt_${attempt}.txt" > "$OUT_DIR/start.txt"
+    set_runtime_timeout_profile
+    start_ok=1
+    break
+  fi
+  echo "START attempt ${attempt} failed (state=${START_STATE:-unknown})."
+  if [[ "$attempt" -lt "$START_RETRIES" ]]; then
+    echo "Re-priming hardware path before retry..."
+    timeout 20 /home/morenoma/Documents/wc_run_v288.sh python3 -u /home/morenoma/Documents/wc_capture_waveforms_png.py \
+      --seconds 0.8 --threshold "$THRESHOLD" --edge "$EDGE" --accept-mv 5 --max-save 1 \
+      --output-dir "/tmp/wc_cli_retry_preflight_${STAMP}_${attempt}" >/tmp/wc_cli_retry_preflight.log 2>&1 || true
+    cooldown_before_retry "$attempt"
+  fi
+done
+
+if [[ "$start_ok" -ne 1 ]]; then
+  echo "ERROR: Could not START MIDAS run after ${START_RETRIES} attempts." >&2
+  echo "Most likely cause: WaveCatcher open timeout in BOR context." >&2
+  echo "Check logs: /home/morenoma/online_wc/wc_midas_frontend.log and /home/morenoma/online_wc/midas.log" >&2
+  echo "Immediate fallback to still record data (direct path):" >&2
+  echo "  /home/morenoma/Documents/wc_run_v288.sh python3 -u /home/morenoma/Documents/wc_capture_waveforms_png.py --seconds ${DURATION} --threshold ${THRESHOLD} --edge ${EDGE} --accept-mv 20 --max-save 200 --output-dir /home/morenoma/Documents/wc_direct_runs/run_${STAMP}" >&2
+  exit 1
+fi
+
 sleep $((DURATION + 1))
-STATE="$(odbedit -e wavecatcher -c "ls '/Runinfo/State'" 2>/dev/null | awk 'NF{v=$NF} END{print v}')"
+STATE="$(get_run_state || true)"
 if [[ "${STATE:-}" == "3" ]]; then
   echo "Stopping run..."
   mtransition -e wavecatcher STOP | tee "$OUT_DIR/stop.txt"
