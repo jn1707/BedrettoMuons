@@ -597,3 +597,36 @@ Practical conclusion:
 - The system is now operationally safer: failures are bounded, explicit, and non-wedging.
 - Root cause remains an OpenDevice context/reliability issue in MIDAS BOR path (vendor stack via FTDI/libusb), not an unresolved trigger-mode implementation bug.
 - Until OpenDevice behavior is made deterministic in MIDAS context, PyDAQ remains the reliable fallback acquisition path for guaranteed data taking.
+
+
+Update: midas_minimal execution check (2026-04-09)
+
+Objective:
+- Execute the new `midas_minimal` branch layout and verify whether it decodes events in an actual START/STOP cycle.
+
+Test configuration:
+- Frontend binary: `~/BedrettoMuons_midas_minimal/midas_minimal/wc_midas_frontend`
+- MIDAS env: experiment `wavecatcher` via `~/online_wc/exptab`
+- Transition sequence:
+  1) clear stale `/Runinfo/Transition in progress`
+  2) START
+  3) wait ~8 s
+  4) STOP
+- Evidence bundle:
+  - `/tmp/midas_minimal_decode2_20260409_113555/`
+    - `frontend.log`
+    - `start_transition_after_clear.log`
+    - `stop_transition_after_clear.log`
+    - `odb_state_after_clear.log`
+
+Observed result:
+- START/STOP transitions return with:
+  - `no handler for transition 1 with sequence number 500`
+  - `no handler for transition 2 with sequence number 500`
+- MIDAS run number increments and run state returns to stopped, but decode counter stays at zero:
+  - `/Equipment/WaveCatcher/Statistics/Events sent = 0`
+- Therefore, in this execution window, `midas_minimal` did **not** decode events.
+
+Interpretation:
+- The minimal branch structure and frontend startup work, but transition handling/data-taking remains non-functional in this run path.
+- This is consistent with the broader MIDAS instability pattern and does not contradict the standalone PyDAQ path, which still decodes events reliably.
