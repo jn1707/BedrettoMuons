@@ -516,58 +516,84 @@ Build/validation notes:
 - `~/online_wc/midas_frontend` rebuilt successfully after these changes (`make`).
 - ODB keys for live/summary are created by frontend init/runtime and become visible once `wc_midas_frontend` is running in the experiment.
 
-Update: MIDAS BOR transition diagnosis and mitigation (2026-04-01)
-- User-visible symptom:
-  - MIDAS stack starts, but START can fail with:
-    - `previous transition did not finish yet`
-    - `cm_transition status 603` from WaveCatcher frontend
-  - Runs then do not record events.
 
-Confirmed root cause:
-- `WAVECAT64CH_OpenDevice()` can block unpredictably inside FTDI/libusb internals.
-- When this call happens in BOR transition context (`begin_of_run` / `rc_transition`),
-  MIDAS transition RPC can stall and leave apparent stuck transition state.
+Update: BOR/OpenDevice investigation, checks performed, and current project state (2026-04-09)
 
-Implemented fix in native frontend (`midas_frontend/wc_midas_frontend.cxx`):
-1) Remove device open from BOR path:
-   - BOR no longer calls `OpenDevice`.
-2) Async open worker at frontend startup:
-   - device open now runs outside transition callback.
-3) Explicit readiness state exposed in ODB:
-   - `/Equipment/WaveCatcher/Variables/device_open_state`
-   - `/Equipment/WaveCatcher/Variables/device_open_state_str`
-   - States: `0 idle, 1 in_progress, 2 ready, 3 failed, 4 timed_out`
-4) Open timeout guard:
-   - `in_progress` promoted to `timed_out` after 180 s.
-5) BOR behavior:
-   - fast-fail with explicit message when device not ready, instead of hanging transition.
-6) Runtime stability patch:
-   - throttled readiness ODB publishing + idle sleep to avoid frontend CPU spin while idle.
+Scope of this update:
+- Consolidates the debug/mitigation work performed after the trigger-mode validation period.
+- Focuses on the remaining blocker: MIDAS START/BOR reliability when opening the WaveCatcher device.
 
-Operational mitigations in CLI/start scripts:
-- `scripts/wc_run_midas_cli.sh`:
-  - added `--start-retries N`
-  - waits for `device_open_state==2` before START
-  - skips START when hardware is not ready (avoids transition churn)
-  - clears stale `/Runinfo/Transition in progress`
-  - can restart frontend between retries to retrigger async open
-- `scripts/wc_start_midas_stack.sh`:
-  - staged timeout profile and hardware preflight retained
-  - stale transition lock clear retained
+Observed failure signature (MIDAS path):
+- During MIDAS BOR/START, frontend can block in:
+  - `WAVECAT64CH_OpenDevice()`
+  - vendor internals: `FT_ListDevices()`
+  - USB layer call observed in stack traces: `libusb_get_string_descriptor_ascii()`
+- User-visible effect in MIDAS when this occurs:
+  - START transition waits for BOR callback path, then eventually times out/aborts.
+  - In previous behavior this could wedge transitions; now mitigated (see below).
 
-Interpretation:
-- This converts failure mode from transition deadlock to bounded readiness gating.
-- If hardware open is slow/fails, operators get explicit readiness status and retry path
-  without wedging MIDAS transition control flow.
+Why this does not become a fatal error in PyDAQ:
+- PyDAQ runs direct, single-process acquisition flow (no MIDAS transition callback watchdog/RPC coupling).
+- In PyDAQ, transient OpenDevice latency/stall does not lock an external transition state machine.
+- Result: PyDAQ can often recover/continue where MIDAS BOR semantics require bounded completion.
 
-Debugging artifacts added in repo:
-- `docs/MIDAS_BOR_DEBUGGING.md`
-- `scripts/wc_check_bor_health.sh`
+Checks and trials completed across sessions:
+1) Library/runtime baseline control
+   - Pinned MIDAS frontend to v2.8.8 WaveCatcher library path and validated binary linkage/rpath.
+   - Confirmed direct Python DAQ path (`wc_run_v288.sh` + `wc_capture_waveforms_png.py`) as known-good reference.
 
-Recommended debug sequence:
-1) Start stack:
-   - `scripts/wc_start_midas_stack.sh`
-2) Inspect BOR/readiness health:
-   - `scripts/wc_check_bor_health.sh`
-3) Run with retry-gated START:
-   - `scripts/wc_run_midas_cli.sh --duration 10 --triggermode normal --edge pos --threshold 0.020 --channels 0 --start-retries 3`
+2) Timeout-only strategy (tested and evaluated)
+   - Increased MIDAS watchdog/transition timeouts (startup and runtime profiles).
+   - Finding: larger timeouts only delayed failure when OpenDevice remained blocked; did not remove root cause.
+
+3) BOR path hardening in frontend
+   - Moved device-open handling to an asynchronous worker (no long blocking in BOR callback).
+   - Added explicit readiness state publication in ODB:
+     - `/Equipment/WaveCatcher/Variables/device_open_state`
+     - `/Equipment/WaveCatcher/Variables/device_open_state_str`
+   - State model used in operation:
+     - `0=idle`, `1=in_progress`, `2=ready`, `3=failed`, `4=timed_out`
+   - Added open timeout -> `timed_out` state to avoid indefinite in-flight behavior.
+   - BOR now fast-fails with explicit message if device is not ready, instead of hanging transition path.
+
+4) MIDAS CLI orchestration hardening
+   - Added readiness-gated START logic to `wc_run_midas_cli.sh`.
+   - Added stale transition lock clearing (`/Runinfo/Transition in progress`).
+   - Added bounded retries and frontend restart between retries.
+   - Added deterministic retry cooldown/probe steps.
+
+5) Startup/operations hardening
+   - `wc_start_midas_stack.sh` performs cleanup and preflight warm-up checks.
+   - Confirmed launcher can run stack cleanly while keeping transition state stable.
+   - Enforced CLI-only mode for tests (custom `wc_control` disabled) to remove UI/control-path ambiguity.
+
+6) Reproducibility and diagnostics assets added
+   - Debug docs/scripts and health checks:
+     - `docs/MIDAS_BOR_DEBUGGING.md`
+     - `scripts/wc_check_bor_health.sh`
+   - Hardware test harness scripts:
+     - `scripts/wc_bor_python_parity_test.py`
+     - `scripts/wc_bor_midas_repro_tomorrow.sh`
+     - `docs/TOMORROW_HARDWARE_TESTS.md`
+   - Controlled test bundles written under `/tmp/wc_bor_repro_*` and `/tmp/wc_cli_only_test_*`.
+
+Current state of the project:
+- Stable/working:
+  - v2.8.8 direct Python DAQ remains functional for acquisition and output generation.
+  - MIDAS stack startup is stable.
+  - MIDAS transition wedging is substantially mitigated by readiness gating and explicit fast-fail behavior.
+  - Trigger configuration tooling and run-control scripts are operational from CLI perspective.
+
+- Remaining blocker:
+  - In problematic sessions, MIDAS readiness remains:
+    - `device_open_state = 1`
+    - `device_open_state_str = in_progress`
+  - Therefore START is intentionally not issued (bounded abort behavior), even though stack itself stays healthy.
+  - Typical concurrent ODB state in this condition:
+    - `/Runinfo/State = 1` (stopped)
+    - `/Runinfo/Transition in progress = 0`
+
+Practical conclusion:
+- The system is now operationally safer: failures are bounded, explicit, and non-wedging.
+- Root cause remains an OpenDevice context/reliability issue in MIDAS BOR path (vendor stack via FTDI/libusb), not an unresolved trigger-mode implementation bug.
+- Until OpenDevice behavior is made deterministic in MIDAS context, PyDAQ remains the reliable fallback acquisition path for guaranteed data taking.
