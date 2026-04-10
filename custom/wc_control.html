@@ -22,7 +22,7 @@
 
 <div id="mmain">
   <table class="mtable">
-    <tr><th class="mtableheader">WaveCatcher Guided Control (MVP)</th></tr>
+    <tr><th class="mtableheader">WaveCatcher Guided Control</th></tr>
     <tr><td>
       <div class="row"><span class="lbl">Trigger mode</span>
         <select id="trigger_mode" class="box">
@@ -43,6 +43,7 @@
       <div class="row"><span class="lbl">Trigger threshold [V]</span><input id="trigger_threshold_v" class="box" type="number" step="0.001"></div>
       <div class="hint">Single threshold value. Applied to selected channels and coincidence partner.</div>
       <div class="row"><span class="lbl">Coincidence channel</span><input id="coincidence_channel" class="box" type="number" min="0" max="63"></div>
+      <div class="row"><span class="lbl">Coincidence threshold [V]</span><input id="coincidence_threshold_v" class="box" type="number" step="0.001"></div>
       <div class="hint">Current hardware coincidence path is 2-channel: primary + partner.</div>
       <div class="row"><span class="lbl">Software trigger rate [Hz]</span><input id="sw_trigger_hz" class="box" type="number" min="0" step="1"></div>
       <div class="row"><span class="lbl">Auto stop mode</span>
@@ -58,13 +59,14 @@
       <div class="row">
         <button class="mbutton" onclick="applyConfig()">Apply to ODB</button>
         <button class="mbutton" onclick="refreshConfig()">Reload from ODB</button>
-        <button class="mbutton" onclick="mhttpd_start_run()">Start</button>
-        <button class="mbutton" onclick="mhttpd_stop_run()">Stop</button>
+        <button class="mbutton" onclick="startRunSafe()">Start</button>
+        <button class="mbutton" onclick="stopRunSafe()">Stop</button>
       </div>
       <div class="row"><span class="lbl">Apply status</span><span id="ui_status" class="mono"></span></div>
       <div class="row"><span class="lbl">Apply error</span><span id="ui_error" class="mono"></span></div>
+      <div class="row"><span class="lbl">Device open state</span><span id="device_open_state" class="mono"></span></div>
       <div class="row"><span class="lbl">Help</span><span id="help_text" class="mono"></span></div>
-      <div class="row"><span class="lbl">Notes</span><span class="mono">You can set different thresholds per channel by selecting channels and re-applying values iteratively.</span></div>
+      <div class="row"><span class="lbl">Notes</span><span class="mono">wc_control writes ODB only; WaveCatcher API calls run inside frontend BOR/EOR paths.</span></div>
     </td></tr>
   </table>
 
@@ -136,6 +138,7 @@ const PATHS = [
   "/Equipment/WaveCatcher/Variables/target_event_count",
   "/Equipment/WaveCatcher/Variables/ui_last_apply_status",
   "/Equipment/WaveCatcher/Variables/ui_last_apply_error",
+  "/Equipment/WaveCatcher/Variables/device_open_state_str",
   "/Equipment/WaveCatcher/Variables/help",
   "/Runinfo/Run number",
   "/Runinfo/State",
@@ -164,6 +167,7 @@ const PATHS = [
 ];
 
 function setText(id, v) { document.getElementById(id).textContent = (v === undefined || v === null) ? "" : String(v); }
+let uiBusy = false;
 
 function stateName(s) {
   if (s === 1) return "Stopped";
@@ -266,27 +270,28 @@ function readUi(data) {
   document.getElementById("target_event_count").value = data[10];
   setText("ui_status", data[11]);
   setText("ui_error", data[12]);
-  setText("help_text", data[13]);
-  setText("run_number", data[14]);
-  setText("run_state", stateName(data[15]));
-  setText("events_sent", data[16]);
-  setText("events_per_sec", data[17]);
-  setText("kbytes_per_sec", data[18]);
-  setText("sum_run_number", data[19]);
-  setText("sum_run_state", data[20]);
-  setText("sum_events_sent", data[21]);
-  setText("sum_elapsed_s", data[22]);
-  setText("sum_rate_hz", data[23]);
-  setText("sum_channels", data[24]);
-  setText("sum_threshold_v", data[25]);
-  setText("sum_mode_edge", `${triggerModeName(data[26])} / ${edgeName(data[27])}`);
-  setText("sum_autostop", autoStopName(data[28], data[29], data[30]));
-  setText("sum_last_file", data[31]);
-  setText("preview_channel", data[32]);
-  setText("preview_samples", data[34]);
-  setText("preview_updated_ms", data[35]);
-  setText("preview_channels_csv", data[36] || "");
-  drawWave(data[37] || "", data[33] || "");
+  setText("device_open_state", data[13]);
+  setText("help_text", data[14]);
+  setText("run_number", data[15]);
+  setText("run_state", stateName(data[16]));
+  setText("events_sent", data[17]);
+  setText("events_per_sec", data[18]);
+  setText("kbytes_per_sec", data[19]);
+  setText("sum_run_number", data[20]);
+  setText("sum_run_state", data[21]);
+  setText("sum_events_sent", data[22]);
+  setText("sum_elapsed_s", data[23]);
+  setText("sum_rate_hz", data[24]);
+  setText("sum_channels", data[25]);
+  setText("sum_threshold_v", data[26]);
+  setText("sum_mode_edge", `${triggerModeName(data[27])} / ${edgeName(data[28])}`);
+  setText("sum_autostop", autoStopName(data[29], data[30], data[31]));
+  setText("sum_last_file", data[32]);
+  setText("preview_channel", data[33]);
+  setText("preview_samples", data[35]);
+  setText("preview_updated_ms", data[36]);
+  setText("preview_channels_csv", data[37] || "");
+  drawWave(data[38] || "", data[34] || "");
 }
 
 function refreshConfig() {
@@ -304,7 +309,9 @@ function buildScpCommand() {
   setText("download_cmd", `scp '${src}' '${host}:${dst}/'`);
 }
 
-function applyConfig() {
+async function applyConfig() {
+  if (uiBusy) return;
+  uiBusy = true;
   const mode = parseInt(document.getElementById("auto_stop_mode").value, 10);
   let duration = parseInt(document.getElementById("run_duration_s").value || "0", 10);
   let target = parseInt(document.getElementById("target_event_count").value || "0", 10);
@@ -323,7 +330,7 @@ function applyConfig() {
     document.getElementById("enabled_channels_csv").value.trim(),
     parseFloat(document.getElementById("trigger_threshold_v").value || "0"),
     parseInt(document.getElementById("coincidence_channel").value || "0", 10),
-    parseFloat(document.getElementById("trigger_threshold_v").value || "0"),
+    parseFloat(document.getElementById("coincidence_threshold_v").value || "0"),
     parseInt(document.getElementById("sw_trigger_hz").value || "0", 10),
     mode,
     duration,
@@ -338,14 +345,49 @@ function applyConfig() {
   const extraVals = [true, thr];
   document.getElementById("run_duration_s").value = duration;
   document.getElementById("target_event_count").value = target;
-  mjsonrpc_db_paste(writePaths, values).then(() => refreshConfig()).catch(mjsonrpc_error_alert);
-  mjsonrpc_db_paste(extraPaths, extraVals).catch(mjsonrpc_error_alert);
+  try {
+    await mjsonrpc_db_paste(writePaths, values);
+    await mjsonrpc_db_paste(extraPaths, extraVals);
+    await refreshConfig();
+  } catch (err) {
+    mjsonrpc_error_alert(err);
+  } finally {
+    uiBusy = false;
+  }
+}
+
+async function startRunSafe() {
+  if (uiBusy) return;
+  uiBusy = true;
+  try {
+    mhttpd_start_run();
+    await new Promise(resolve => setTimeout(resolve, 600));
+    await refreshConfig();
+  } catch (err) {
+    mjsonrpc_error_alert(err);
+  } finally {
+    uiBusy = false;
+  }
+}
+
+async function stopRunSafe() {
+  if (uiBusy) return;
+  uiBusy = true;
+  try {
+    mhttpd_stop_run();
+    await new Promise(resolve => setTimeout(resolve, 600));
+    await refreshConfig();
+  } catch (err) {
+    mjsonrpc_error_alert(err);
+  } finally {
+    uiBusy = false;
+  }
 }
 
 function initPage() {
   mhttpd_init("WaveCatcher Control");
   refreshConfig();
-  window.setInterval(refreshConfig, 2000);
+  window.setInterval(() => { if (!uiBusy) refreshConfig(); }, 2000);
 }
 </script>
 </body>

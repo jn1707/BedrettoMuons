@@ -7,6 +7,7 @@ export MIDAS_DIR=/home/morenoma/online_wc
 export PATH=/home/morenoma/packages/midas/bin:$PATH
 export LD_LIBRARY_PATH=/home/morenoma/.local/lib/wavecatcher/v288/lib:/usr/local/lib64
 ENABLE_PY_BRIDGE="${WC_ENABLE_PY_BRIDGE:-0}"
+WC_DISABLE_CUSTOM_CONTROL="${WC_DISABLE_CUSTOM_CONTROL:-0}"
 WC_WD_STARTUP_MS="${WC_WD_STARTUP_MS:-300000}"
 WC_TR_CONNECT_STARTUP_MS="${WC_TR_CONNECT_STARTUP_MS:-300000}"
 WC_TR_TOTAL_STARTUP_MS="${WC_TR_TOTAL_STARTUP_MS:-420000}"
@@ -108,6 +109,19 @@ if [[ -x /home/morenoma/Documents/wc_run_v288.sh ]] && [[ -f /home/morenoma/Docu
     echo "WARNING: Preflight did not complete successfully."
     echo "  Check: /tmp/wc_preflight.log"
     echo "  START may fail if hardware open is still blocked."
+  fi
+fi
+
+# Manage custom wc_control page availability.
+if [[ "${WC_DISABLE_CUSTOM_CONTROL}" == "1" ]]; then
+  if [[ -f /home/morenoma/online_wc/custom/wc_control.html ]] && [[ ! -f /home/morenoma/online_wc/custom/wc_control.html.disabled ]]; then
+    mv /home/morenoma/online_wc/custom/wc_control.html /home/morenoma/online_wc/custom/wc_control.html.disabled
+    echo "Custom wc_control page disabled (CLI-only mode)."
+  fi
+else
+  if [[ -f /home/morenoma/online_wc/custom/wc_control.html.disabled ]] && [[ ! -f /home/morenoma/online_wc/custom/wc_control.html ]]; then
+    mv /home/morenoma/online_wc/custom/wc_control.html.disabled /home/morenoma/online_wc/custom/wc_control.html
+    echo "Custom wc_control page enabled."
   fi
 fi
 

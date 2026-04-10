@@ -268,6 +268,7 @@ static void refresh_active_channels()
 
 static int wc_check(WAVECAT64CH_ErrCode code, const char *where)
 {
+   cm_msg(MINFO, "WaveCatcher", "CALL RESULT: %s rc=%d", where, (int)code);
    if (code == WAVECAT64CH_Success)
       return SUCCESS;
    cm_msg(MERROR, "WaveCatcher", "%s failed with code %d", where, (int)code);
@@ -392,16 +393,26 @@ static INT wc_open_device_with_retries()
    INT st = FE_ERR_DRIVER;
    int handle = -1;
    for (int attempt = 1; attempt <= 6; ++attempt) {
-      cm_msg(MINFO, "WaveCatcher", "calling WAVECAT64CH_OpenDevice() attempt=%d", attempt);
+      cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_OpenDevice attempt=%d", attempt);
       handle = -1;
       st = wc_check(WAVECAT64CH_OpenDevice(&handle), "OpenDevice");
       if (st == SUCCESS) {
-         g_device_open = true;
          break;
       }
       ss_sleep(200);
    }
-   return st;
+   if (st != SUCCESS) return st;
+
+   cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_ResetDevice");
+   st = wc_check(WAVECAT64CH_ResetDevice(), "ResetDevice");
+   if (st != SUCCESS) return st;
+   cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetDefaultParameters");
+   st = wc_check(WAVECAT64CH_SetDefaultParameters(), "SetDefaultParameters");
+   if (st != SUCCESS) return st;
+
+   /* Mark device ready for run-time API calls only after full open sequence succeeds. */
+   g_device_open = true;
+   return SUCCESS;
 }
 
 static INT wc_force_idle_reset()
@@ -430,7 +441,7 @@ static INT wc_apply_run_configuration()
    wc_set_ui_status("applying", "");
 
    for (int ch : selected_channels) {
-      cm_msg(MINFO, "WaveCatcher", "cfg: SetChannelState ch=%d", ch);
+      cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetChannelState ch=%d", ch);
       st = wc_check(
          WAVECAT64CH_SetChannelState(WAVECAT64CH_FRONT_CHANNEL, ch, WAVECAT64CH_STATE_ON),
          "SetChannelState");
@@ -441,7 +452,7 @@ static INT wc_apply_run_configuration()
    }
 
    if (use_coincidence && g_coincidence_channel != g_enabled_channel) {
-      cm_msg(MINFO, "WaveCatcher", "cfg: SetChannelState coincidence_ch=%d", g_coincidence_channel);
+      cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetChannelState coincidence_ch=%d", g_coincidence_channel);
       st = wc_check(
          WAVECAT64CH_SetChannelState(WAVECAT64CH_FRONT_CHANNEL, g_coincidence_channel, WAVECAT64CH_STATE_ON),
          "SetChannelState(coincidence)");
@@ -452,7 +463,7 @@ static INT wc_apply_run_configuration()
    }
 
    for (int ch : selected_channels) {
-      cm_msg(MINFO, "WaveCatcher", "cfg: SetTriggerSourceState ch=%d", ch);
+      cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerSourceState ch=%d", ch);
       st = wc_check(
          WAVECAT64CH_SetTriggerSourceState(WAVECAT64CH_FRONT_CHANNEL, ch, WAVECAT64CH_STATE_ON),
          "SetTriggerSourceState");
@@ -463,7 +474,7 @@ static INT wc_apply_run_configuration()
    }
 
    if (use_coincidence && g_coincidence_channel != g_enabled_channel) {
-      cm_msg(MINFO, "WaveCatcher", "cfg: SetTriggerSourceState coincidence_ch=%d", g_coincidence_channel);
+      cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerSourceState coincidence_ch=%d", g_coincidence_channel);
       st = wc_check(
          WAVECAT64CH_SetTriggerSourceState(WAVECAT64CH_FRONT_CHANNEL, g_coincidence_channel, WAVECAT64CH_STATE_ON),
          "SetTriggerSourceState(coincidence)");
@@ -474,7 +485,7 @@ static INT wc_apply_run_configuration()
    }
 
    for (int ch : selected_channels) {
-      cm_msg(MINFO, "WaveCatcher", "cfg: SetTriggerEdge ch=%d edge=%d", ch, (int)g_trigger_edge);
+      cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerEdge ch=%d edge=%d", ch, (int)g_trigger_edge);
       st = wc_check(
          WAVECAT64CH_SetTriggerEdge(WAVECAT64CH_FRONT_CHANNEL, ch, g_trigger_edge),
          "SetTriggerEdge");
@@ -485,7 +496,7 @@ static INT wc_apply_run_configuration()
       float thr = g_trigger_threshold_v;
       if (g_apply_threshold_to_selected)
          thr = g_selected_threshold_v;
-      cm_msg(MINFO, "WaveCatcher", "cfg: SetTriggerThreshold ch=%d thr=%.3f", ch, thr);
+      cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerThreshold ch=%d thr=%.3f", ch, thr);
       st = wc_check(
          WAVECAT64CH_SetTriggerThreshold(WAVECAT64CH_FRONT_CHANNEL, ch, thr),
          "SetTriggerThreshold");
@@ -496,13 +507,13 @@ static INT wc_apply_run_configuration()
    }
 
    if (use_coincidence && g_coincidence_channel != g_enabled_channel) {
-      cm_msg(MINFO, "WaveCatcher", "cfg: SetTriggerEdge coincidence_ch=%d edge=%d", g_coincidence_channel, (int)g_trigger_edge);
+      cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerEdge coincidence_ch=%d edge=%d", g_coincidence_channel, (int)g_trigger_edge);
       st = wc_check(
          WAVECAT64CH_SetTriggerEdge(WAVECAT64CH_FRONT_CHANNEL, g_coincidence_channel, g_trigger_edge),
          "SetTriggerEdge(coincidence)");
       if (st != SUCCESS) return st;
 
-      cm_msg(MINFO, "WaveCatcher", "cfg: SetTriggerThreshold coincidence_ch=%d thr=%.3f", g_coincidence_channel, g_coincidence_threshold_v);
+      cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerThreshold coincidence_ch=%d thr=%.3f", g_coincidence_channel, g_coincidence_threshold_v);
       st = wc_check(
          WAVECAT64CH_SetTriggerThreshold(WAVECAT64CH_FRONT_CHANNEL, g_coincidence_channel, g_coincidence_threshold_v),
          "SetTriggerThreshold(coincidence)");
@@ -518,23 +529,26 @@ static INT wc_apply_run_configuration()
    } else if (g_sw_trigger_hz > 0 || g_trigger_mode_odb == 1) {
       trig_mode = WAVECAT64CH_TRIGGER_SOFT;
    }
-   cm_msg(MINFO, "WaveCatcher", "cfg: SetTriggerMode mode=%d", (int)trig_mode);
+   cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerMode mode=%d", (int)trig_mode);
    st = wc_check(WAVECAT64CH_SetTriggerMode(trig_mode), "SetTriggerMode");
    if (st != SUCCESS) return st;
 
-   cm_msg(MINFO, "WaveCatcher", "cfg: PrepareEvent");
+   cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_PrepareEvent");
    st = wc_check(WAVECAT64CH_PrepareEvent(), "PrepareEvent");
    if (st != SUCCESS) {
       wc_set_ui_status("error", "PrepareEvent failed");
       return st;
    }
 
-    cm_msg(MINFO, "WaveCatcher",
-           "BOR settings: ch=%d csv=%s thr=%.3f selected_thr=%.3f apply_selected=%d edge=%d mode=%d odb_mode=%d sw_trigger_hz=%d coinc_ch=%d coinc_thr=%.3f duration_s=%d auto_stop_mode=%d target_events=%d compat=minimal-v288",
-           g_enabled_channel, g_enabled_channels_csv.c_str(), g_trigger_threshold_v, g_selected_threshold_v, (int)g_apply_threshold_to_selected,
-            (int)g_trigger_edge, (int)trig_mode, g_trigger_mode_odb, g_sw_trigger_hz,
-           g_coincidence_channel, g_coincidence_threshold_v,
-           g_run_duration_s, g_auto_stop_mode, g_target_event_count);
+   cm_msg(MINFO, "WaveCatcher",
+          "BOR settings: ch=%d thr=%.3f edge=%d mode=%d odb_mode=%d sw_hz=%d",
+          g_enabled_channel, g_trigger_threshold_v, (int)g_trigger_edge,
+          (int)trig_mode, g_trigger_mode_odb, g_sw_trigger_hz);
+   cm_msg(MINFO, "WaveCatcher",
+          "BOR extras: csv=%s sel_thr=%.3f apply_sel=%d coinc_ch=%d coinc_thr=%.3f dur_s=%d auto=%d target=%d",
+          g_enabled_channels_csv.c_str(), g_selected_threshold_v, (int)g_apply_threshold_to_selected,
+          g_coincidence_channel, g_coincidence_threshold_v, g_run_duration_s,
+          g_auto_stop_mode, g_target_event_count);
    wc_set_ui_status("applied", "");
    return SUCCESS;
 }
@@ -625,8 +639,8 @@ INT begin_of_run(INT run_number, char *error)
    g_wave_nan_only = g_wave_channels_written = g_wave_size_zero = g_wave_ptr_null = 0;
    memset(&g_evt, 0, sizeof(g_evt));
 
-   /* Device must be opened by async worker before BOR starts. */
-   if (!g_device_open) {
+   /* Device must fully complete async open/reset/default before BOR starts. */
+   if (g_device_open_state != 2 || !g_device_open) {
       if (g_device_open_state == 1) {
          snprintf(error, 256, "Device open still in progress; retry START in ~10-30s");
          cm_msg(MERROR, "WaveCatcher", "begin_of_run: device open still in progress for run=%d", run_number);
@@ -662,6 +676,7 @@ INT begin_of_run(INT run_number, char *error)
       return st;
    }
 
+   cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_AllocateEventStructure");
    st = wc_check(WAVECAT64CH_AllocateEventStructure(&g_evt), "AllocateEventStructure");
    t_alloc_ms = ss_millitime() - bor_t0;
    if (st != SUCCESS) {
@@ -672,6 +687,7 @@ INT begin_of_run(INT run_number, char *error)
    }
    g_evt_allocated = true;
 
+   cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_StartRun");
    st = wc_check(WAVECAT64CH_StartRun(), "StartRun");
    t_start_ms = ss_millitime() - bor_t0;
    if (st != SUCCESS) {
@@ -718,7 +734,8 @@ INT end_of_run(INT run_number, char *error)
    wc_set_live_value("preview_samples", &i0, sizeof(i0), TID_INT);
    wc_set_live_value("preview_updated_ms", &i0, sizeof(i0), TID_INT);
    /* keep device open between runs to reduce open/close churn */
-   if (g_run_active || g_device_open) {
+    if (g_run_active || g_device_open) {
+      cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_StopRun (EOR)");
       WAVECAT64CH_ErrCode ec = WAVECAT64CH_StopRun();
       if (ec != WAVECAT64CH_Success) {
          cm_msg(MINFO, "WaveCatcher", "StopRun at EOR returned %d", (int)ec);
@@ -865,7 +882,7 @@ INT read_wavecatcher_event(char *pevent, INT off)
    }
    g_decode_calls++;
 
-   WAVECAT64CH_ErrCode rc = WAVECAT64CH_DecodeEvent(&g_evt);
+    WAVECAT64CH_ErrCode rc = WAVECAT64CH_DecodeEvent(&g_evt);
    if (rc != WAVECAT64CH_Success) {
       cm_msg(MERROR, "WaveCatcher", "DecodeEvent rc=%d", (int)rc);
       g_event_in_buffer = false;
