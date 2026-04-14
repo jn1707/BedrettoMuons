@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <array>
 
 #include "midas.h"
 #include "mfe.h"
@@ -77,8 +78,14 @@ static DWORD g_run_start_ms = 0;
 static bool g_stop_transition_requested = false;
 static bool g_shutdown_requested = false;
 static DWORD g_last_live_update_ms = 0;
+static DWORD g_last_analysis_update_ms = 0;
 static std::recursive_mutex g_wc_api_mutex;
 static std::atomic<bool> g_transition_active {false};
+static const INT g_api_settle_after_reset_ms = 10000;
+static std::array<unsigned long long, 64> g_channel_decode_hits {};
+static std::array<float, 64> g_channel_last_peak {};
+static std::array<float, 64> g_channel_last_charge {};
+static std::array<float, 64> g_channel_last_baseline {};
 
 struct TransitionGuard {
    bool acquired = false;
@@ -128,6 +135,11 @@ static void wc_publish_device_state_if_needed(bool force = false)
 
 static int wc_check(WAVECAT64CH_ErrCode code, const char *where);
 
+static void wc_ensure_dir(const char *path)
+{
+   db_create_key(hDB, 0, path, TID_KEY);
+}
+
 static void wc_set_run_summary_value(const char *name, const void *data, INT size, INT tid)
 {
    char path[256];
@@ -139,6 +151,36 @@ static void wc_set_live_value(const char *name, const void *data, INT size, INT 
 {
    char path[256];
    snprintf(path, sizeof(path), "/Equipment/WaveCatcher/Live/%s", name);
+   db_set_value(hDB, 0, path, data, size, 1, tid);
+}
+
+static void wc_set_analysis_global_value(const char *name, const void *data, INT size, INT tid)
+{
+   wc_ensure_dir("/Analysis");
+   wc_ensure_dir("/Analysis/Global");
+   char path[256];
+   snprintf(path, sizeof(path), "/Analysis/Global/%s", name);
+   db_set_value(hDB, 0, path, data, size, 1, tid);
+}
+
+static void wc_set_analysis_live_value(const char *name, const void *data, INT size, INT tid)
+{
+   wc_ensure_dir("/Analysis");
+   wc_ensure_dir("/Analysis/Live");
+   char path[256];
+   snprintf(path, sizeof(path), "/Analysis/Live/%s", name);
+   db_set_value(hDB, 0, path, data, size, 1, tid);
+}
+
+static void wc_set_analysis_channel_value(int ch, const char *name, const void *data, INT size, INT tid)
+{
+   wc_ensure_dir("/Analysis");
+   wc_ensure_dir("/Analysis/Channels");
+   char ch_dir[256];
+   snprintf(ch_dir, sizeof(ch_dir), "/Analysis/Channels/Ch%02d", ch);
+   wc_ensure_dir(ch_dir);
+   char path[256];
+   snprintf(path, sizeof(path), "/Analysis/Channels/Ch%02d/%s", ch, name);
    db_set_value(hDB, 0, path, data, size, 1, tid);
 }
 
@@ -235,10 +277,53 @@ static void ensure_odb_schema_defaults()
 
    wc_set_live_value("preview_channel", &i0, sizeof(i0), TID_INT);
    wc_set_live_value("preview_waveform_csv", "", 1, TID_STRING);
-    wc_set_live_value("preview_channels_csv", "", 1, TID_STRING);
-    wc_set_live_value("preview_waveforms_encoded", "", 1, TID_STRING);
+   wc_set_live_value("preview_channels_csv", "", 1, TID_STRING);
+   wc_set_live_value("preview_waveforms_encoded", "", 1, TID_STRING);
    wc_set_live_value("preview_samples", &i0, sizeof(i0), TID_INT);
    wc_set_live_value("preview_updated_ms", &i0, sizeof(i0), TID_INT);
+   const char *warn_txt = "";
+   const char *idle_txt = "idle";
+   const char *channels_summary = "";
+   wc_ensure_dir("/Analysis");
+   wc_ensure_dir("/Analysis/HistoryLinks");
+   wc_ensure_dir("/Scan");
+   wc_ensure_dir("/Scan/Threshold");
+   wc_ensure_dir("/UI");
+   wc_ensure_dir("/UI/Dashboard");
+   wc_set_analysis_global_value("EventRateHz", &d0, sizeof(d0), TID_DOUBLE);
+   wc_set_analysis_global_value("CoincidenceRateHz", &d0, sizeof(d0), TID_DOUBLE);
+   wc_set_analysis_global_value("DecodedEvents", &q0, sizeof(q0), TID_QWORD);
+   wc_set_analysis_global_value("RunLiveSeconds", &d0, sizeof(d0), TID_DOUBLE);
+   wc_set_analysis_global_value("WarningActive", &i0, sizeof(i0), TID_INT);
+   wc_set_analysis_global_value("WarningText", warn_txt, 1, TID_STRING);
+   wc_set_analysis_live_value("ChannelsSummaryCsv", channels_summary, 1, TID_STRING);
+   wc_set_analysis_live_value("PreviewSamples", &i0, sizeof(i0), TID_INT);
+
+   db_set_value(hDB, 0, "/UI/Dashboard/SelectedChannelsCsv", "", 1, 1, TID_STRING);
+   db_set_value(hDB, 0, "/UI/Dashboard/SelectedPlotMode", "rate", 5, 1, TID_STRING);
+   INT refresh_ms = 2000;
+   db_set_value(hDB, 0, "/UI/Dashboard/RefreshMs", &refresh_ms, sizeof(refresh_ms), 1, TID_INT);
+   const char *history_link = "/?cmd=history";
+   db_set_value(hDB, 0, "/Analysis/HistoryLinks/GlobalRate",
+                history_link, (INT)strlen(history_link) + 1, 1, TID_STRING);
+   db_set_value(hDB, 0, "/Analysis/HistoryLinks/CoincidenceRate",
+                history_link, (INT)strlen(history_link) + 1, 1, TID_STRING);
+   db_set_value(hDB, 0, "/Analysis/HistoryLinks/ChannelRates",
+                history_link, (INT)strlen(history_link) + 1, 1, TID_STRING);
+
+   db_set_value(hDB, 0, "/Scan/Threshold/Request", &i0, sizeof(i0), 1, TID_INT);
+   db_set_value(hDB, 0, "/Scan/Threshold/State", idle_txt, 5, 1, TID_STRING);
+   db_set_value(hDB, 0, "/Scan/Threshold/StartV", &f0, sizeof(f0), 1, TID_FLOAT);
+   db_set_value(hDB, 0, "/Scan/Threshold/StopV", &f0, sizeof(f0), 1, TID_FLOAT);
+   float step_v = 0.005f;
+   db_set_value(hDB, 0, "/Scan/Threshold/StepV", &step_v, sizeof(step_v), 1, TID_FLOAT);
+   INT dwell_s = 2;
+   db_set_value(hDB, 0, "/Scan/Threshold/DwellS", &dwell_s, sizeof(dwell_s), 1, TID_INT);
+   db_set_value(hDB, 0, "/Scan/Threshold/ChannelsCsv", "", 1, 1, TID_STRING);
+   db_set_value(hDB, 0, "/Scan/Threshold/ProgressPct", &i0, sizeof(i0), 1, TID_INT);
+   db_set_value(hDB, 0, "/Scan/Threshold/ResultCsvPath", "", 1, 1, TID_STRING);
+   db_set_value(hDB, 0, "/Scan/Threshold/ResultPlotPath", "", 1, 1, TID_STRING);
+   db_set_value(hDB, 0, "/Scan/Threshold/LastError", "", 1, 1, TID_STRING);
 }
 
 static void wc_set_ui_status(const std::string &status, const std::string &error)
@@ -432,6 +517,8 @@ static INT wc_open_device_with_retries()
    cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_ResetDevice");
    st = wc_check(WAVECAT64CH_ResetDevice(), "ResetDevice");
    if (st != SUCCESS) return st;
+   cm_msg(MINFO, "WaveCatcher", "Settle sleep after ResetDevice: %d ms", (int)g_api_settle_after_reset_ms);
+   ss_sleep(g_api_settle_after_reset_ms);
    cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetDefaultParameters");
    st = wc_check(WAVECAT64CH_SetDefaultParameters(), "SetDefaultParameters");
    if (st != SUCCESS) return st;
@@ -449,6 +536,8 @@ static INT wc_force_idle_reset()
    if (st != SUCCESS) {
       return st;
    }
+   cm_msg(MINFO, "WaveCatcher", "Settle sleep after ResetDevice: %d ms", (int)g_api_settle_after_reset_ms);
+   ss_sleep(g_api_settle_after_reset_ms);
    cm_msg(MINFO, "WaveCatcher", "calling WAVECAT64CH_SetDefaultParameters()");
    st = wc_check(WAVECAT64CH_SetDefaultParameters(), "SetDefaultParameters");
    return st;
@@ -670,6 +759,11 @@ INT begin_of_run(INT run_number, char *error)
    g_poll_calls = g_poll_hits = g_decode_calls = g_decode_hits = 0;
    g_poll_incomplete = g_poll_no_event = g_poll_other_err = 0;
    g_wave_nan_only = g_wave_channels_written = g_wave_size_zero = g_wave_ptr_null = 0;
+   g_channel_decode_hits.fill(0);
+   g_channel_last_peak.fill(0.0f);
+   g_channel_last_charge.fill(0.0f);
+   g_channel_last_baseline.fill(0.0f);
+   g_last_analysis_update_ms = 0;
    memset(&g_evt, 0, sizeof(g_evt));
 
    /* Device must fully complete async open/reset/default before BOR starts. */
@@ -845,14 +939,54 @@ INT frontend_loop(void)
          elapsed_s = (double)(now_ms - g_run_start_ms) / 1000.0;
       }
       double rate_hz = (elapsed_s > 0.0) ? ((double)g_decode_hits / elapsed_s) : 0.0;
-      wc_set_run_summary_value("run_state", "running", 8, TID_STRING);
-      wc_set_run_summary_value("events_sent", &g_decode_hits, sizeof(g_decode_hits), TID_QWORD);
-      wc_set_run_summary_value("elapsed_s", &elapsed_s, sizeof(elapsed_s), TID_DOUBLE);
-      wc_set_run_summary_value("event_rate_hz", &rate_hz, sizeof(rate_hz), TID_DOUBLE);
+
+      DWORD now_ms = ss_millitime();
+      if ((now_ms - g_last_analysis_update_ms) >= 1000U) {
+         int warning_active = (rate_hz >= 50.0) ? 1 : 0;
+         const char *warning_text = warning_active ? "WARNING: High event rate >=50 Hz" : "";
+         double coincidence_rate_hz = 0.0;
+         wc_set_analysis_global_value("EventRateHz", &rate_hz, sizeof(rate_hz), TID_DOUBLE);
+         wc_set_analysis_global_value("CoincidenceRateHz", &coincidence_rate_hz, sizeof(coincidence_rate_hz), TID_DOUBLE);
+         wc_set_analysis_global_value("DecodedEvents", &g_decode_hits, sizeof(g_decode_hits), TID_QWORD);
+         wc_set_analysis_global_value("RunLiveSeconds", &elapsed_s, sizeof(elapsed_s), TID_DOUBLE);
+         wc_set_analysis_global_value("WarningActive", &warning_active, sizeof(warning_active), TID_INT);
+         wc_set_analysis_global_value("WarningText", warning_text, (INT)strlen(warning_text) + 1, TID_STRING);
+
+         std::ostringstream summary;
+         for (int ch : g_active_channels) {
+            if (ch < 0 || ch >= 64)
+               continue;
+            double ch_rate_hz = (elapsed_s > 0.0) ? ((double)g_channel_decode_hits[ch] / elapsed_s) : 0.0;
+            wc_set_analysis_channel_value(ch, "RateHz", &ch_rate_hz, sizeof(ch_rate_hz), TID_DOUBLE);
+            wc_set_analysis_channel_value(ch, "PeakmV", &g_channel_last_peak[ch], sizeof(g_channel_last_peak[ch]), TID_FLOAT);
+            wc_set_analysis_channel_value(ch, "Charge", &g_channel_last_charge[ch], sizeof(g_channel_last_charge[ch]), TID_FLOAT);
+            wc_set_analysis_channel_value(ch, "Baseline", &g_channel_last_baseline[ch], sizeof(g_channel_last_baseline[ch]), TID_FLOAT);
+            int updated_ms = (int)now_ms;
+            wc_set_analysis_channel_value(ch, "LastUpdateMs", &updated_ms, sizeof(updated_ms), TID_INT);
+
+            if (summary.tellp() > 0) {
+               summary << ";";
+            }
+            summary << ch << "," << ch_rate_hz << "," << g_channel_last_peak[ch] << ","
+                    << g_channel_last_charge[ch] << "," << g_channel_last_baseline[ch];
+         }
+         std::string summary_csv = summary.str();
+         wc_set_analysis_live_value("ChannelsSummaryCsv", summary_csv.c_str(), (INT)summary_csv.size() + 1, TID_STRING);
+         g_last_analysis_update_ms = now_ms;
+      }
    }
    if (g_shutdown_requested) {
       wc_stop_close();
    }
+
+   INT scan_request = 0;
+   INT size = sizeof(scan_request);
+   db_get_value(hDB, 0, "/Scan/Threshold/Request", &scan_request, &size, TID_INT, TRUE);
+   if (scan_request == 1 && g_run_active) {
+      const char *state = "deferred_run_active";
+      db_set_value(hDB, 0, "/Scan/Threshold/State", state, (INT)strlen(state) + 1, 1, TID_STRING);
+   }
+
    /* Avoid busy-spin when idle. */
    if (!g_run_active) {
       ss_sleep(10);
@@ -985,6 +1119,12 @@ INT read_wavecatcher_event(char *pevent, INT off)
       feats.push_back(cd.Baseline);
       feats.push_back(cd.Peak);
       feats.push_back(cd.Charge);
+      if (ch >= 0 && ch < 64) {
+         g_channel_decode_hits[ch]++;
+         g_channel_last_peak[ch] = cd.Peak;
+         g_channel_last_charge[ch] = cd.Charge;
+         g_channel_last_baseline[ch] = cd.Baseline;
+      }
 
       if (cd.WaveformData == NULL) {
          g_wave_ptr_null++;
@@ -1015,21 +1155,36 @@ INT read_wavecatcher_event(char *pevent, INT off)
    }
 
    DWORD now_ms = ss_millitime();
-   if ((now_ms - g_last_live_update_ms) >= 1000U && !channels_to_read.empty()) {
-      const int max_samples = 256;
+    if ((now_ms - g_last_live_update_ms) >= 1000U && !channels_to_read.empty()) {
+      const int max_samples = 128;
+      const int max_preview_channels = 6;
       std::ostringstream channels_csv_oss;
       std::ostringstream encoded_oss;
       int first_channel = -1;
       int overlay_samples = 0;
       std::string first_wave_csv;
+      int preview_channels_written = 0;
 
       for (int ch : channels_to_read) {
+         if (preview_channels_written >= max_preview_channels) {
+            break;
+         }
          WAVECAT64CH_ChannelDataStruct cd {};
-         rc = WAVECAT64CH_ReadChannelDataStruct(&g_evt, ch, &cd);
+         {
+            std::lock_guard<std::recursive_mutex> lock(g_wc_api_mutex);
+            rc = WAVECAT64CH_ReadChannelDataStruct(&g_evt, ch, &cd);
+         }
          if (rc != WAVECAT64CH_Success || cd.WaveformData == NULL || cd.WaveformDataSize <= 1)
             continue;
 
-         int out_n = std::min(cd.WaveformDataSize, max_samples);
+         int stride = 1;
+         if (cd.WaveformDataSize > max_samples) {
+            stride = (cd.WaveformDataSize + max_samples - 1) / max_samples;
+         }
+         int out_n = (cd.WaveformDataSize + stride - 1) / stride;
+         if (out_n > max_samples) {
+            out_n = max_samples;
+         }
          if (first_channel < 0) {
             first_channel = ch;
             overlay_samples = out_n;
@@ -1045,15 +1200,21 @@ INT read_wavecatcher_event(char *pevent, INT off)
 
          std::ostringstream one_wave;
          for (int i = 0; i < out_n; i++) {
+            int src_idx = i * stride;
+            if (src_idx >= cd.WaveformDataSize) {
+               src_idx = cd.WaveformDataSize - 1;
+            }
+            float sample = cd.WaveformData[src_idx];
             if (i) {
                encoded_oss << ",";
                one_wave << ",";
             }
-            encoded_oss << cd.WaveformData[i];
-            one_wave << cd.WaveformData[i];
+            encoded_oss << sample;
+            one_wave << sample;
          }
          if (first_wave_csv.empty())
             first_wave_csv = one_wave.str();
+         preview_channels_written++;
       }
 
       int preview_ms = (int)now_ms;
@@ -1065,6 +1226,7 @@ INT read_wavecatcher_event(char *pevent, INT off)
       wc_set_live_value("preview_waveforms_encoded", overlay_encoded.c_str(), (INT)overlay_encoded.size() + 1, TID_STRING);
       wc_set_live_value("preview_samples", &overlay_samples, sizeof(overlay_samples), TID_INT);
       wc_set_live_value("preview_updated_ms", &preview_ms, sizeof(preview_ms), TID_INT);
+      wc_set_analysis_live_value("PreviewSamples", &overlay_samples, sizeof(overlay_samples), TID_INT);
       g_last_live_update_ms = now_ms;
    }
 

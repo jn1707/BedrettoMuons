@@ -598,35 +598,185 @@ Practical conclusion:
 - Root cause remains an OpenDevice context/reliability issue in MIDAS BOR path (vendor stack via FTDI/libusb), not an unresolved trigger-mode implementation bug.
 - Until OpenDevice behavior is made deterministic in MIDAS context, PyDAQ remains the reliable fallback acquisition path for guaranteed data taking.
 
+Update: Python-first failure learning and MIDAS race fix (2026-04-10)
 
-Update: midas_minimal execution check (2026-04-09)
+Why we forced Python DAQ to fail first:
+- We reproduced Python instability by adding intrusive "INFO/snapshot" calls around critical API calls
+  (extra device queries like `GetLibraryVersion`, `GetWaveCatDevices`, `GetDeviceInfo` interleaved
+  with acquisition setup).
+- In that instrumented state, Python often shifted failures to config calls (`ResetDevice` / `SetDefaultParameters`)
+  and produced no events.
+- After removing intrusive snapshot polling and keeping only lightweight call/result logs,
+  Python recovered and again produced non-zero decoded events.
 
-Objective:
-- Execute the new `midas_minimal` branch layout and verify whether it decodes events in an actual START/STOP cycle.
+Transfer of this learning to MIDAS:
+- Treat WaveCatcher setup calls as an uninterrupted critical section.
+- Do not inject extra device-query API calls during open/config transitions.
 
-Test configuration:
-- Frontend binary: `~/BedrettoMuons_midas_minimal/midas_minimal/wc_midas_frontend`
-- MIDAS env: experiment `wavecatcher` via `~/online_wc/exptab`
-- Transition sequence:
-  1) clear stale `/Runinfo/Transition in progress`
-  2) START
-  3) wait ~8 s
-  4) STOP
-- Evidence bundle:
-  - `/tmp/midas_minimal_decode2_20260409_113555/`
-    - `frontend.log`
-    - `start_transition_after_clear.log`
-    - `stop_transition_after_clear.log`
-    - `odb_state_after_clear.log`
+Threading/race root cause in MIDAS frontend:
+- In `wc_midas_frontend.cxx`, device open was performed in an async worker.
+- The bug: `g_device_open=true` was set immediately after `OpenDevice` succeeded, before
+  `ResetDevice` + `SetDefaultParameters` completed in that same worker.
+- BOR checked `g_device_open` and could proceed into `wc_apply_run_configuration()` while the open worker
+  was still executing reset/default, creating overlapping WaveCatcher API activity across paths.
+- This is the interrupt/race condition that matched the Python "intrusive interruption" pattern.
 
-Observed result:
-- START/STOP transitions return with:
-  - `no handler for transition 1 with sequence number 500`
-  - `no handler for transition 2 with sequence number 500`
-- MIDAS run number increments and run state returns to stopped, but decode counter stays at zero:
-  - `/Equipment/WaveCatcher/Statistics/Events sent = 0`
-- Therefore, in this execution window, `midas_minimal` did **not** decode events.
+Implemented fix:
+1) Readiness publication fixed:
+   - `g_device_open` is now set only after full `OpenDevice -> ResetDevice -> SetDefaultParameters` success.
+   - BOR gates on ready state (`device_open_state==2`) plus `g_device_open`.
+2) Open sequencing made deterministic in init path:
+   - open worker runs as a single startup sequence from `frontend_init` (no detached overlap with BOR).
+3) Additional stability fix discovered during validation:
+   - BOR crashed in MIDAS `message_print` due an oversized single log line; split into shorter log lines.
 
-Interpretation:
-- The minimal branch structure and frontend startup work, but transition handling/data-taking remains non-functional in this run path.
-- This is consistent with the broader MIDAS instability pattern and does not contradict the standalone PyDAQ path, which still decodes events reliably.
+Validation after fix (same target settings as Python check):
+- Trigger: normal, positive edge, threshold `0.020 V`, channel `0`, duration `10 s`.
+- MIDAS run starts and stops cleanly (no transition timeout/RPC abort).
+- Non-zero acquisition confirmed: `events_sent/decode_hits = 914` in run `#2333`.
+
+Update: server/web race-hardening pass (2026-04-14)
+
+Goal:
+- Eliminate race windows between MIDAS transitions, frontend API calls, and web-triggered control actions.
+
+Frontend hardening (`midas_frontend/wc_midas_frontend.cxx`):
+1) Added API-call serialization lock:
+   - Introduced a frontend-wide recursive mutex guarding WaveCatcher API surfaces used in:
+     - open/reset/default,
+     - BOR configuration path,
+     - readout (`ReadEventBuffer`, `DecodeEvent`, `ReadChannelDataStruct`, software trigger send),
+     - cleanup stop/close.
+   - This prevents overlapping hardware API calls from different frontend execution paths.
+2) Added transition re-entry guard:
+   - Added atomic transition guard for `begin_of_run` / `end_of_run`.
+   - If a transition callback is already active, subsequent transition entry is rejected explicitly instead of allowing overlap.
+
+Web GUI hardening (`custom/wc_control.html`):
+1) Added explicit transition-state visibility:
+   - Displays `/Runinfo/Transition in progress` directly in the control page.
+2) Added serialized UI actions + preflight gating:
+   - Apply/Start/Stop are serialized (`uiBusy`) and now perform state checks before issuing commands:
+     - block Apply during transition or while run is not stopped,
+     - block Start unless `device_open_state_str == ready` and no transition is active,
+     - block Stop unless run is currently running and no transition is active.
+   - This avoids duplicate/overlapping web-side transition requests.
+
+Latest parity check at 20 mV / 10 s (Python vs MIDAS CLI):
+- Python direct DAQ result:
+  - `elapsed_s=10.126`, `decoded=4`, `saved=4` (non-zero data observed in this run).
+- MIDAS CLI result in same session:
+  - run could not start because frontend readiness remained `device_open_state=1 (in_progress)` across retry windows.
+  - START was skipped by readiness gate and no MIDAS event-count parity could be measured in that session.
+
+Conclusion of this pass:
+- Transition/API overlap race surfaces were hardened in both server and web-control layers.
+- Remaining blocker in failed sessions is open-readiness stall (`in_progress`) rather than a web-triggered transition race.
+
+Update: standalone MIDAS CLI blocking trace (2026-04-14, continuation)
+- This section records a dedicated MIDAS-CLI-only trace (no web START/STOP interaction) to pinpoint
+  where blocking occurs in the startup/open/readiness path.
+- Test target maintained for parity:
+  - normal trigger, positive edge, threshold `0.020 V`, channel `0`, duration `10 s`.
+
+Findings from standalone trace:
+- With stack/frontend launched non-interactively, logs showed:
+  - `OpenDevice rc=0`
+  - `ResetDevice rc=0`
+  - then prolonged stall before `SetDefaultParameters` completion.
+- During this stall, ODB remained:
+  - `device_open_state_str = in_progress`
+  - so MIDAS CLI correctly skipped START attempts by readiness gate.
+
+Mitigation applied for this path:
+- Added explicit settle delay between reset and default-parameter calls:
+  - `ss_sleep(10000)` after `ResetDevice` in:
+    - startup open sequence,
+    - BOR baseline reset/default sequence.
+- This was added to reduce timing/race sensitivity between back-to-back vendor API calls in non-interactive runtime.
+
+Additional CLI contention hardening:
+- `wc_run_midas_cli.sh` preflight (direct Python hardware access) is now explicit opt-in:
+  - default `WC_CLI_PREFLIGHT=0`.
+- Rationale: avoid introducing a second process touching WaveCatcher during frontend readiness/open.
+
+Post-mitigation validation (20 mV, 10 s):
+1) MIDAS CLI:
+   - START succeeded with `device_open_state: ready`.
+   - `Events sent = 610` in `/Equipment/WaveCatcher/Statistics`.
+2) Python parity reference (same hardware settings, direct event-rate script):
+   - `wc_event_rate_workaround.py` result:
+   - `decoded = 612` over 10 s (`~61.2 Hz`).
+
+Parity conclusion:
+- MIDAS CLI (`610`) and Python direct parity reference (`612`) are now in close agreement at
+  `0.020 V`, `10 s`, normal/positive-edge configuration.
+
+Update: dashboard + ODB monitoring extension (2026-04-14)
+- Added frontend analysis namespaces for web monitoring:
+  - `/Analysis/Global/{EventRateHz,CoincidenceRateHz,DecodedEvents,RunLiveSeconds,WarningActive,WarningText}`
+  - `/Analysis/Channels/ChXX/{RateHz,PeakmV,Charge,Baseline,LastUpdateMs}`
+  - `/Analysis/Live/{ChannelsSummaryCsv,PreviewSamples}`
+- Added single warning policy exactly as requested:
+  - `WARNING: High event rate >=50 Hz` when `EventRateHz >= 50`.
+- Added dashboard controls/state namespaces:
+  - `/UI/Dashboard/{SelectedChannelsCsv,SelectedPlotMode,RefreshMs}`
+  - `/Scan/Threshold/{Request,State,StartV,StopV,StepV,DwellS,ChannelsCsv,ProgressPct,ResultCsvPath,ResultPlotPath,LastError}`
+- Updated custom control page (`custom/wc_control.html`):
+  - keeps existing run-control layout and race-safe action gating,
+  - adds global monitoring cards, warning banner, rate trend plot,
+  - adds per-channel monitoring grid, history links, and threshold-scan request panel.
+- ODB waveform-storage guardrail enforced in live preview path:
+  - decimated samples, capped channel count, latest-only overwrite in ODB,
+  - full waveform payload remains in MIDAS event banks/files (`WCWF`) for offline analysis.
+- Added threshold scan worker integration:
+  - script: `scripts/wc_threshold_scan_worker.sh`
+  - launched by stack startup script (enabled by default via `WC_ENABLE_SCAN_WORKER=1`),
+  - executes stepped threshold scans from `/Scan/Threshold/*`, writes CSV + SVG result artifacts,
+  - publishes live scan state/progress and serves latest plot at `/custom/wc_threshold_scan_latest.svg`.
+
+Update: usability and page layout fixes (2026-04-14, follow-up)
+- Fixed UI edit-overwrite behavior:
+  - run-control page now pauses config-field refresh while operator is editing,
+  - manual edits are preserved until Apply/Reload.
+- Fixed custom STOP path robustness:
+  - corrected page data mapping and simplified stop action flow to avoid stale-index gating issues.
+- Split custom UI into dedicated pages for clarity:
+  - `/custom/wc_control.html` (run controls),
+  - `/custom/wc_monitoring.html` (live monitoring + threshold scan + waveform),
+  - `/custom/wc_summary.html` (last-run summary).
+- Removed the "Download last run to remote" panel from the custom interface.
+- Improved monitoring visualizations:
+  - labeled/ticked physics-style axes for event-rate and waveform plots.
+- Fixed history-link and scan plot-path issues:
+  - history links now use valid `/ ?cmd=history` targets (without invalid index drift),
+  - scan worker now defers publishing `ResultPlotPath` until plot exists and creates a placeholder SVG.
+- Fixed scan state race:
+  - frontend no longer overwrites worker state (`running`) with `requested`.
+- Last-run summary behavior adjusted:
+  - summary now remains a true *last completed run* snapshot (no live overwrite during current run).
+
+Update: logging + scan production hardening (2026-04-14, latest)
+- `wc_start_midas_stack.sh` now starts `mlogger` explicitly, so MIDAS runs are persisted to disk by default.
+- Verified threshold scan production path as functional:
+  - worker output CSV is now populated with non-placeholder fields by reading stable run-summary keys:
+    - `/Equipment/WaveCatcher/RunSummary/events_sent`
+    - `/Equipment/WaveCatcher/RunSummary/run_number`
+  - scan SVG now includes ticks and numeric labels on both axes.
+- Waveform monitoring axis update:
+  - custom live waveform view now uses physical time axis (`0..15 ns`) with 1 ns ticks.
+
+MIDAS+ROOT retry run (requested re-test):
+- Performed a fresh run with logger format set to `MIDAS,ROOT`:
+  - `/Logger/Channels/0/Settings/Format = MIDAS,ROOT`
+  - run settings: normal trigger, +edge, threshold `0.05 V`, duration `10 s`
+  - run advanced from `2382` to `2383`
+- Produced files:
+  - `/home/morenoma/online_wc/run02383.mid.lz4`
+  - `/home/morenoma/online_wc/run02383.mid.lz4.crc32c`
+  - `/home/morenoma/online_wc/run02383.mid.crc32c`
+- Observed outcome of built-in ROOT path on this setup:
+  - no `.root` file was produced in `online_wc` for this run despite `MIDAS,ROOT` format setting.
+- Logger settings were restored after test:
+  - `/Logger/Channels/0/Settings/Format = MIDAS`
+  - `/Logger/Channels/0/Settings/Compress = lz4`

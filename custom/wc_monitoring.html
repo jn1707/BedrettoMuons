@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html class="mcss" lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="midas.css">
+  <script src="midas.js"></script>
+  <script src="mhttpd.js"></script>
+  <title>WaveCatcher Live Monitoring</title>
+  <style>
+    .row { display:flex; gap:10px; align-items:center; margin:6px 0; flex-wrap:wrap; }
+    .lbl { min-width:220px; font-weight:600; }
+    .box { width:180px; }
+    .wide { width:420px; }
+    .mono { font-family:monospace; }
+    .warn { background:#fff3cd; color:#7a4f01; border:1px solid #f0d58c; padding:8px 10px; font-weight:700; }
+    .cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:8px; }
+    .card { border:1px solid #ddd; padding:8px; background:#fafafa; }
+    .card h4 { margin:0 0 6px 0; font-size:95%; }
+    canvas { border:1px solid #ccc; background:#fff; }
+    .nav a { margin-right:12px; }
+  </style>
+</head>
+<body class="mcss" onload="initPage()">
+<div id="mheader"></div>
+<div id="msidenav"></div>
+<div id="mmain">
+  <table class="mtable">
+    <tr><th class="mtableheader">WaveCatcher Pages</th></tr>
+    <tr><td class="nav">
+      <a href="/custom/wc_control.html">Run Controls</a>
+      <a href="/custom/wc_monitoring.html">Live Monitoring</a>
+      <a href="/custom/wc_summary.html">Last Run Summary</a>
+    </td></tr>
+  </table>
+
+  <table class="mtable">
+    <tr><th class="mtableheader">Global Monitoring</th></tr>
+    <tr><td>
+      <div id="warn_banner" class="warn" style="display:none;"></div>
+      <div class="cards">
+        <div class="card"><h4>Run state</h4><div id="run_state" class="mono"></div></div>
+        <div class="card"><h4>Event Rate [Hz]</h4><div id="event_rate" class="mono"></div></div>
+        <div class="card"><h4>Coincidence Rate [Hz]</h4><div id="coinc_rate" class="mono"></div></div>
+        <div class="card"><h4>Decoded Events</h4><div id="decoded_events" class="mono"></div></div>
+      </div>
+      <div class="row">
+        <span class="lbl">History links</span>
+        <a id="hist_global_rate" href="#" target="_blank">Global rate</a>
+        <a id="hist_coinc_rate" href="#" target="_blank">Coincidence rate</a>
+        <a id="hist_channel_rate" href="#" target="_blank">Channel rates</a>
+      </div>
+      <div class="row"><canvas id="rate_canvas" width="900" height="260"></canvas></div>
+    </td></tr>
+  </table>
+
+  <table class="mtable">
+    <tr><th class="mtableheader">Channel Monitoring</th></tr>
+    <tr><td><div id="channels_grid" class="cards"></div></td></tr>
+  </table>
+
+  <table class="mtable">
+    <tr><th class="mtableheader">Live Waveform Preview</th></tr>
+    <tr><td>
+      <div class="row"><span class="lbl">Overlay channels</span><span id="preview_channels_csv" class="mono"></span></div>
+      <div class="row"><span class="lbl">Samples shown</span><span id="preview_samples" class="mono"></span></div>
+      <div class="row"><span class="lbl">Updated [ms]</span><span id="preview_updated_ms" class="mono"></span></div>
+      <div class="row"><canvas id="wf_canvas" width="900" height="280"></canvas></div>
+    </td></tr>
+  </table>
+</div>
+
+<script>
+const PATHS = [
+  "/Runinfo/State",
+  "/Analysis/Global/EventRateHz",
+  "/Analysis/Global/CoincidenceRateHz",
+  "/Analysis/Global/DecodedEvents",
+  "/Analysis/Global/RunLiveSeconds",
+  "/Analysis/Global/WarningActive",
+  "/Analysis/Global/WarningText",
+  "/Analysis/Live/ChannelsSummaryCsv",
+  "/Analysis/HistoryLinks/GlobalRate",
+  "/Analysis/HistoryLinks/CoincidenceRate",
+  "/Analysis/HistoryLinks/ChannelRates",
+  "/Equipment/WaveCatcher/Live/preview_channels_csv",
+  "/Equipment/WaveCatcher/Live/preview_waveforms_encoded",
+  "/Equipment/WaveCatcher/Live/preview_waveform_csv",
+  "/Equipment/WaveCatcher/Live/preview_samples",
+  "/Equipment/WaveCatcher/Live/preview_updated_ms"
+];
+const IDX = Object.fromEntries(PATHS.map((p,i)=>[p,i]));
+const rateHistory = [];
+const MAX_HIST = 180;
+function v(data, path) { return data[IDX[path]]; }
+function setText(id, x) { document.getElementById(id).textContent = (x == null) ? "" : String(x); }
+function runStateName(x) { return Number(x) === 3 ? "Running" : (Number(x) === 2 ? "Paused" : "Stopped"); }
+
+function parseChannelsSummary(csv) {
+  const out = [];
+  if (!csv) return out;
+  for (const p of String(csv).split(";")) {
+    if (!p) continue;
+    const f = p.split(",");
+    if (f.length < 5) continue;
+    const ch = Number(f[0]), rate = Number(f[1]), peak = Number(f[2]), charge = Number(f[3]), baseline = Number(f[4]);
+    if (!Number.isFinite(ch)) continue;
+    out.push({ ch, rate: Number.isFinite(rate) ? rate : 0, peak, charge, baseline });
+  }
+  return out;
+}
+
+function drawAxes(ctx, w, h, left, right, top, bottom, xlabel, ylabel) {
+  ctx.strokeStyle = "#333";
+  ctx.beginPath();
+  ctx.moveTo(left, h - bottom);
+  ctx.lineTo(w - right, h - bottom);
+  ctx.moveTo(left, top);
+  ctx.lineTo(left, h - bottom);
+  ctx.stroke();
+  ctx.fillStyle = "#333";
+  ctx.font = "12px sans-serif";
+  ctx.fillText(xlabel, (w - right + left) / 2 - 30, h - 8);
+  ctx.save();
+  ctx.translate(16, (h - bottom + top) / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText(ylabel, -30, 0);
+  ctx.restore();
+}
+
+function drawRatePlot() {
+  const c = document.getElementById("rate_canvas"), ctx = c.getContext("2d");
+  const w = c.width, h = c.height, L=55, R=20, T=15, B=38;
+  ctx.clearRect(0, 0, w, h);
+  drawAxes(ctx, w, h, L, R, T, B, "Time [a.u.]", "Rate [Hz]");
+  if (rateHistory.length < 2) return;
+  const ymax = Math.max(1, ...rateHistory);
+  ctx.fillStyle = "#666";
+  for (let i=0;i<=5;i++) {
+    const yv = ymax * i / 5;
+    const y = T + (ymax - yv) * (h - T - B) / ymax;
+    ctx.fillText(yv.toFixed(1), 6, y + 4);
+    ctx.strokeStyle = "#eee";
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w - R, y); ctx.stroke();
+  }
+  ctx.strokeStyle = "#1f77b4";
+  ctx.beginPath();
+  for (let i=0;i<rateHistory.length;i++) {
+    const x = L + i * (w - L - R) / (rateHistory.length - 1);
+    const y = T + (ymax - rateHistory[i]) * (h - T - B) / ymax;
+    if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+}
+
+function parseOverlay(encoded, fallbackCsv) {
+  const traces = [];
+  if (encoded) {
+    for (const part of String(encoded).split(";")) {
+      const p = part.indexOf("|");
+      if (p < 0) continue;
+      const ch = Number(part.slice(0,p));
+      const vals = part.slice(p+1).split(",").map(Number).filter(Number.isFinite);
+      if (!Number.isFinite(ch) || vals.length < 2) continue;
+      traces.push({ ch, vals });
+    }
+  }
+  if (traces.length === 0 && fallbackCsv) {
+    const vals = String(fallbackCsv).split(",").map(Number).filter(Number.isFinite);
+    if (vals.length > 1) traces.push({ ch:"single", vals });
+  }
+  return traces;
+}
+
+function drawWaveform(encoded, fallbackCsv) {
+  const c = document.getElementById("wf_canvas"), ctx = c.getContext("2d");
+  const w = c.width, h = c.height, L=55, R=20, T=15, B=38;
+  ctx.clearRect(0,0,w,h);
+  drawAxes(ctx, w, h, L, R, T, B, "Time [ns]", "Amplitude [a.u.]");
+  const traces = parseOverlay(encoded, fallbackCsv);
+  if (traces.length === 0) return;
+  let vmin = Infinity, vmax = -Infinity;
+  for (const t of traces) for (const x of t.vals) { if (x < vmin) vmin = x; if (x > vmax) vmax = x; }
+  if (!(vmax > vmin)) { vmax += 1; vmin -= 1; }
+  ctx.fillStyle="#666";
+  for (let i=0;i<=5;i++) {
+    const yv = vmin + (vmax - vmin) * i / 5;
+    const y = T + (vmax - yv) * (h - T - B) / (vmax - vmin);
+    ctx.fillText(yv.toFixed(1), 6, y + 4);
+    ctx.strokeStyle = "#eee";
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w - R, y); ctx.stroke();
+  }
+  const colors = ["#0b5","#d44","#36c","#e67e22","#8e44ad","#16a085","#7f8c8d","#c0392b"];
+  const tMinNs = 0.0;
+  const tMaxNs = 15.0;
+  ctx.fillStyle = "#666";
+  for (let t = 0; t <= 15; t += 1) {
+    const x = L + (t - tMinNs) * (w - L - R) / (tMaxNs - tMinNs);
+    ctx.fillText(String(t), x - 4, h - B + 16);
+    ctx.strokeStyle = "#f3f3f3";
+    ctx.beginPath(); ctx.moveTo(x, T); ctx.lineTo(x, h - B); ctx.stroke();
+  }
+  traces.forEach((t, idx) => {
+    ctx.strokeStyle = colors[idx % colors.length];
+    ctx.beginPath();
+    for (let i=0;i<t.vals.length;i++) {
+      const tNs = tMinNs + i * (tMaxNs - tMinNs) / (t.vals.length - 1);
+      const x = L + (tNs - tMinNs) * (w - L - R) / (tMaxNs - tMinNs);
+      const y = T + (vmax - t.vals[i]) * (h - T - B) / (vmax - vmin);
+      if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+  });
+}
+
+async function refresh() {
+  const rpc = await mjsonrpc_db_get_values(PATHS);
+  const d = rpc.result.data;
+  setText("run_state", runStateName(v(d, "/Runinfo/State")));
+  const er = Number(v(d, "/Analysis/Global/EventRateHz") || 0);
+  setText("event_rate", er.toFixed(3));
+  setText("coinc_rate", Number(v(d, "/Analysis/Global/CoincidenceRateHz") || 0).toFixed(3));
+  setText("decoded_events", v(d, "/Analysis/Global/DecodedEvents") || 0);
+  const wa = Number(v(d, "/Analysis/Global/WarningActive") || 0) !== 0;
+  const wt = String(v(d, "/Analysis/Global/WarningText") || "");
+  const wb = document.getElementById("warn_banner");
+  wb.style.display = (wa && wt) ? "" : "none";
+  wb.textContent = wt;
+
+  document.getElementById("hist_global_rate").href = String(v(d, "/Analysis/HistoryLinks/GlobalRate") || "/?cmd=history");
+  document.getElementById("hist_coinc_rate").href = String(v(d, "/Analysis/HistoryLinks/CoincidenceRate") || "/?cmd=history");
+  document.getElementById("hist_channel_rate").href = String(v(d, "/Analysis/HistoryLinks/ChannelRates") || "/?cmd=history");
+
+  const channels = parseChannelsSummary(v(d, "/Analysis/Live/ChannelsSummaryCsv"));
+  const grid = document.getElementById("channels_grid");
+  grid.innerHTML = "";
+  for (const it of channels) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `<h4>Ch ${it.ch}</h4>
+      <div class="mono">Rate: ${it.rate.toFixed(3)} Hz</div>
+      <div class="mono">Peak: ${Number(it.peak).toFixed(2)}</div>
+      <div class="mono">Charge: ${Number(it.charge).toFixed(2)}</div>
+      <div class="mono">Baseline: ${Number(it.baseline).toFixed(2)}</div>`;
+    grid.appendChild(card);
+  }
+
+  rateHistory.push(er);
+  if (rateHistory.length > MAX_HIST) rateHistory.shift();
+  drawRatePlot();
+
+  setText("preview_channels_csv", v(d, "/Equipment/WaveCatcher/Live/preview_channels_csv") || "");
+  setText("preview_samples", v(d, "/Equipment/WaveCatcher/Live/preview_samples") || 0);
+  setText("preview_updated_ms", v(d, "/Equipment/WaveCatcher/Live/preview_updated_ms") || 0);
+  drawWaveform(
+    v(d, "/Equipment/WaveCatcher/Live/preview_waveforms_encoded") || "",
+    v(d, "/Equipment/WaveCatcher/Live/preview_waveform_csv") || ""
+  );
+}
+
+function initPage() {
+  mhttpd_init("WaveCatcher Live Monitoring");
+  refresh().catch(mjsonrpc_error_alert);
+  setInterval(() => refresh().catch(() => {}), 2000);
+}
+</script>
+</body>
+</html>

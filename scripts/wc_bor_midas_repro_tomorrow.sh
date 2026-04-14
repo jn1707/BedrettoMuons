@@ -13,7 +13,9 @@ echo "Output dir: $OUT"
 
 echo "[1/6] Build frontend"
 cd "$ROOT/midas_frontend"
-make >"$OUT/make.log" 2>&1
+if ! make >"$OUT/make.log" 2>&1; then
+  echo "Build failed; continuing with existing binaries" | tee -a "$OUT/make.log"
+fi
 
 echo "[2/6] Start stack"
 cd "$ROOT"
@@ -36,6 +38,7 @@ echo "[6/6] Capture post-run health + relevant logs"
 scripts/wc_check_bor_health.sh >"$OUT/bor_health_after.txt" 2>&1 || true
 tail -n 300 /home/morenoma/online_wc/midas.log >"$OUT/midas_tail.log" 2>/dev/null || true
 tail -n 200 /home/morenoma/online_wc/wc_midas_frontend.log >"$OUT/frontend_tail.log" 2>/dev/null || true
+echo "$OUT" > /tmp/wc_bor_last_outdir.txt
 
 echo "Done. Collected artifacts in: $OUT"
 echo "Key files:"
@@ -44,4 +47,3 @@ echo "  $OUT/midas_cli.log"
 echo "  $OUT/bor_health_before.txt"
 echo "  $OUT/bor_health_after.txt"
 echo "  $OUT/midas_tail.log"
-

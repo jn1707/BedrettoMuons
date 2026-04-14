@@ -7,6 +7,7 @@ export MIDAS_DIR=/home/morenoma/online_wc
 export PATH=/home/morenoma/packages/midas/bin:$PATH
 export LD_LIBRARY_PATH=/home/morenoma/.local/lib/wavecatcher/v288/lib:/usr/local/lib64
 ENABLE_PY_BRIDGE="${WC_ENABLE_PY_BRIDGE:-0}"
+ENABLE_SCAN_WORKER="${WC_ENABLE_SCAN_WORKER:-1}"
 WC_DISABLE_CUSTOM_CONTROL="${WC_DISABLE_CUSTOM_CONTROL:-0}"
 WC_WD_STARTUP_MS="${WC_WD_STARTUP_MS:-300000}"
 WC_TR_CONNECT_STARTUP_MS="${WC_TR_CONNECT_STARTUP_MS:-300000}"
@@ -65,17 +66,21 @@ stop_matching_cmd() {
 # Clean previous stack started via this launcher to avoid duplicate processes/ports.
 stop_pid_file /tmp/wc_midas_mserver.pid
 stop_pid_file /tmp/wc_midas_mhttpd.pid
+stop_pid_file /tmp/wc_midas_mlogger.pid
 stop_pid_file /tmp/wc_midas_frontend.pid
 # Python bridge/service are optional and disabled by default.
 stop_pid_file /tmp/wc_midas_bridge.pid
 stop_pid_file /tmp/wc_daq_service.pid
+stop_pid_file /tmp/wc_threshold_scan_worker.pid
 stop_matching_cmd "/home/morenoma/Documents/wc_midas_bridge.py --poll 1.0"
 stop_matching_cmd "/home/morenoma/Documents/wc_daq/service.py"
+stop_matching_cmd "/home/morenoma/online_wc/scripts/wc_threshold_scan_worker.sh"
 stop_matching_cmd "/home/morenoma/online_wc/midas_frontend/wc_midas_frontend"
 stop_matching_cmd "/home/morenoma/online_wc/midas_frontend/wc_midas_frontend -D -e wavecatcher"
 stop_matching_cmd "/home/morenoma/packages/midas/bin/mhttpd -D -e wavecatcher -h localhost:1175"
 stop_matching_cmd "/home/morenoma/packages/midas/bin/mhttpd -D -e wavecatcher --no-passwords --no-hostlist"
 stop_matching_cmd "/home/morenoma/packages/midas/bin/mserver -e wavecatcher"
+stop_matching_cmd "/home/morenoma/packages/midas/bin/mlogger -e wavecatcher"
 
 # Start mserver.
 /home/morenoma/packages/midas/bin/mserver -e wavecatcher > /home/morenoma/online_wc/mserver_live.log 2>&1 &
@@ -95,6 +100,16 @@ sleep 1
 MHTTPD_PID="$(pgrep -f '/home/morenoma/packages/midas/bin/mhttpd -D -e wavecatcher --no-passwords --no-hostlist' | head -n 1 || true)"
 if [[ -n "${MHTTPD_PID}" ]]; then
   echo "${MHTTPD_PID}" > /tmp/wc_midas_mhttpd.pid
+fi
+
+# Start mlogger so run files are written to disk.
+setsid /home/morenoma/packages/midas/bin/mlogger -e wavecatcher > /home/morenoma/online_wc/mlogger_live.log 2>&1 < /dev/null &
+MLOGGER_PID=$!
+echo "${MLOGGER_PID}" > /tmp/wc_midas_mlogger.pid
+sleep 1
+if ! kill -0 "${MLOGGER_PID}" 2>/dev/null; then
+  echo "WARNING: mlogger failed to stay alive."
+  tail -n 80 /home/morenoma/online_wc/mlogger_live.log 2>/dev/null || true
 fi
 
 # Hardware preflight first: warm up USB/library path before frontend transition callbacks.
@@ -126,11 +141,11 @@ else
 fi
 
 # Start WaveCatcher MIDAS frontend (direct hardware readout path).
-# Start frontend in daemon mode (stable with MIDAS message handling).
-/home/morenoma/online_wc/midas_frontend/wc_midas_frontend -D -e wavecatcher > /home/morenoma/online_wc/wc_midas_frontend.log 2>&1
+# Use setsid to keep non-daemon frontend alive after launcher exits.
+setsid /home/morenoma/online_wc/midas_frontend/wc_midas_frontend -e wavecatcher > /home/morenoma/online_wc/wc_midas_frontend.log 2>&1 < /dev/null &
+FRONTEND_PID=$!
 sleep 1
-FRONTEND_PID="$(pgrep -f '/home/morenoma/online_wc/midas_frontend/wc_midas_frontend -D -e wavecatcher' | head -n 1 || true)"
-if [[ -z "${FRONTEND_PID}" ]] || ! kill -0 "${FRONTEND_PID}" 2>/dev/null; then
+if ! kill -0 "${FRONTEND_PID}" 2>/dev/null; then
   echo "ERROR: wc_midas_frontend failed to stay alive"
   echo "Last frontend log lines:"
   tail -n 120 /home/morenoma/online_wc/wc_midas_frontend.log 2>/dev/null || true
@@ -159,7 +174,14 @@ if [[ "${ENABLE_PY_BRIDGE}" == "1" ]]; then
   echo "${BRIDGE_PID}" > /tmp/wc_midas_bridge.pid
   echo "Started: mserver=${MSERVER_PID} mhttpd=${MHTTPD_PID:-unknown} frontend=${FRONTEND_PID} daq=${DAQ_PID} bridge=${BRIDGE_PID}"
 else
-  echo "Started: mserver=${MSERVER_PID} mhttpd=${MHTTPD_PID:-unknown} frontend=${FRONTEND_PID} (python bridge/service disabled)"
+  echo "Started: mserver=${MSERVER_PID} mhttpd=${MHTTPD_PID:-unknown} mlogger=${MLOGGER_PID} frontend=${FRONTEND_PID} (python bridge/service disabled)"
+fi
+
+if [[ "${ENABLE_SCAN_WORKER}" == "1" ]]; then
+  setsid /home/morenoma/online_wc/scripts/wc_threshold_scan_worker.sh > /home/morenoma/online_wc/wc_threshold_scan_worker.log 2>&1 < /dev/null &
+  SCAN_WORKER_PID=$!
+  echo "${SCAN_WORKER_PID}" > /tmp/wc_threshold_scan_worker.pid
+  echo "Threshold scan worker started: pid=${SCAN_WORKER_PID}"
 fi
 
 if curl -sS -o /dev/null http://127.0.0.1:8080; then

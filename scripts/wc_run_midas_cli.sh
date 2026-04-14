@@ -75,6 +75,8 @@ WC_WD_RUNTIME_MS="${WC_WD_RUNTIME_MS:-120000}"
 WC_TR_CONNECT_RUNTIME_MS="${WC_TR_CONNECT_RUNTIME_MS:-120000}"
 WC_TR_TOTAL_RUNTIME_MS="${WC_TR_TOTAL_RUNTIME_MS:-180000}"
 WC_CLI_RESTART_STACK="${WC_CLI_RESTART_STACK:-0}"
+WC_CLI_PREFLIGHT="${WC_CLI_PREFLIGHT:-0}"
+WC_CLI_OPEN_SETTLE_S="${WC_CLI_OPEN_SETTLE_S:-10}"
 
 if [[ "${WC_CLI_RESTART_STACK}" == "1" ]] && [[ -x /home/morenoma/Documents/wc_start_midas_stack.sh ]]; then
   /home/morenoma/Documents/wc_start_midas_stack.sh >/dev/null
@@ -165,24 +167,26 @@ cooldown_before_retry() {
 
 restart_frontend_only() {
   local pid
-  pid="$(pgrep -f '/home/morenoma/online_wc/midas_frontend/wc_midas_frontend -D -e wavecatcher' | head -n 1 || true)"
+  pid="$(pgrep -f '/home/morenoma/online_wc/midas_frontend/wc_midas_frontend.*-e wavecatcher' | head -n 1 || true)"
   if [[ -n "${pid}" ]]; then
     echo "Restarting frontend PID ${pid} to retry device open..."
     kill "${pid}" 2>/dev/null || true
     sleep 2
   fi
-  /home/morenoma/online_wc/midas_frontend/wc_midas_frontend -D -e wavecatcher > /home/morenoma/online_wc/wc_midas_frontend.log 2>&1
-  sleep 3
+  setsid /home/morenoma/online_wc/midas_frontend/wc_midas_frontend -e wavecatcher > /home/morenoma/online_wc/wc_midas_frontend.log 2>&1 < /dev/null &
+  sleep "${WC_CLI_OPEN_SETTLE_S}"
 }
 
 ensure_frontend_running
 
-echo "Priming hardware path (direct v288 preflight)..."
-if ! timeout 20 /home/morenoma/Documents/wc_run_v288.sh python3 -u /home/morenoma/Documents/wc_capture_waveforms_png.py \
-  --seconds 0.8 --threshold "$THRESHOLD" --edge "$EDGE" --accept-mv 5 --max-save 1 \
-  --output-dir "/tmp/wc_cli_preflight_${STAMP}" >/tmp/wc_cli_preflight.log 2>&1; then
-  echo "WARNING: preflight did not complete; MIDAS START may still timeout."
-  echo "Check /tmp/wc_cli_preflight.log"
+if [[ "${WC_CLI_PREFLIGHT}" == "1" ]]; then
+  echo "Priming hardware path (direct v288 preflight, explicit opt-in)..."
+  if ! timeout 20 /home/morenoma/Documents/wc_run_v288.sh python3 -u /home/morenoma/Documents/wc_capture_waveforms_png.py \
+    --seconds 0.8 --threshold "$THRESHOLD" --edge "$EDGE" --accept-mv 5 --max-save 1 \
+    --output-dir "/tmp/wc_cli_preflight_${STAMP}" >/tmp/wc_cli_preflight.log 2>&1; then
+    echo "WARNING: preflight did not complete; MIDAS START may still timeout."
+    echo "Check /tmp/wc_cli_preflight.log"
+  fi
 fi
 
 echo "Configuring ODB..."
@@ -235,10 +239,12 @@ for attempt in $(seq 1 "$START_RETRIES"); do
   fi
   echo "START attempt ${attempt} failed (state=${START_STATE:-unknown})."
   if [[ "$attempt" -lt "$START_RETRIES" ]]; then
-    echo "Re-priming hardware path before retry..."
-    timeout 20 /home/morenoma/Documents/wc_run_v288.sh python3 -u /home/morenoma/Documents/wc_capture_waveforms_png.py \
-      --seconds 0.8 --threshold "$THRESHOLD" --edge "$EDGE" --accept-mv 5 --max-save 1 \
-      --output-dir "/tmp/wc_cli_retry_preflight_${STAMP}_${attempt}" >/tmp/wc_cli_retry_preflight.log 2>&1 || true
+    if [[ "${WC_CLI_PREFLIGHT}" == "1" ]]; then
+      echo "Re-priming hardware path before retry (explicit opt-in)..."
+      timeout 20 /home/morenoma/Documents/wc_run_v288.sh python3 -u /home/morenoma/Documents/wc_capture_waveforms_png.py \
+        --seconds 0.8 --threshold "$THRESHOLD" --edge "$EDGE" --accept-mv 5 --max-save 1 \
+        --output-dir "/tmp/wc_cli_retry_preflight_${STAMP}_${attempt}" >/tmp/wc_cli_retry_preflight.log 2>&1 || true
+    fi
     cooldown_before_retry "$attempt"
   fi
 done
