@@ -65,6 +65,7 @@
       <div class="row"><span class="lbl">Apply status</span><span id="ui_status" class="mono"></span></div>
       <div class="row"><span class="lbl">Apply error</span><span id="ui_error" class="mono"></span></div>
       <div class="row"><span class="lbl">Device open state</span><span id="device_open_state" class="mono"></span></div>
+      <div class="row"><span class="lbl">Transition in progress</span><span id="transition_in_progress" class="mono"></span></div>
       <div class="row"><span class="lbl">Help</span><span id="help_text" class="mono"></span></div>
       <div class="row"><span class="lbl">Notes</span><span class="mono">wc_control writes ODB only; WaveCatcher API calls run inside frontend BOR/EOR paths.</span></div>
     </td></tr>
@@ -164,10 +165,14 @@ const PATHS = [
   "/Equipment/WaveCatcher/Live/preview_updated_ms",
   "/Equipment/WaveCatcher/Live/preview_channels_csv",
   "/Equipment/WaveCatcher/Live/preview_waveforms_encoded"
+  ,"/Runinfo/Transition in progress"
 ];
 
 function setText(id, v) { document.getElementById(id).textContent = (v === undefined || v === null) ? "" : String(v); }
 let uiBusy = false;
+let uiRunState = 1;
+let uiDeviceOpenState = "idle";
+let uiTransitionInProgress = 0;
 
 function stateName(s) {
   if (s === 1) return "Stopped";
@@ -292,6 +297,10 @@ function readUi(data) {
   setText("preview_updated_ms", data[36]);
   setText("preview_channels_csv", data[37] || "");
   drawWave(data[38] || "", data[34] || "");
+  setText("transition_in_progress", data[39]);
+  uiRunState = Number(data[16] || 1);
+  uiDeviceOpenState = String(data[13] || "idle");
+  uiTransitionInProgress = Number(data[39] || 0);
 }
 
 function refreshConfig() {
@@ -312,40 +321,49 @@ function buildScpCommand() {
 async function applyConfig() {
   if (uiBusy) return;
   uiBusy = true;
-  const mode = parseInt(document.getElementById("auto_stop_mode").value, 10);
-  let duration = parseInt(document.getElementById("run_duration_s").value || "0", 10);
-  let target = parseInt(document.getElementById("target_event_count").value || "0", 10);
-  if (mode === 1) {
-    target = 0;
-  } else if (mode === 2) {
-    duration = 0;
-  } else {
-    duration = 0;
-    target = 0;
-  }
-  const values = [
-    parseInt(document.getElementById("trigger_mode").value, 10),
-    parseInt(document.getElementById("trigger_edge").value, 10),
-    parseInt(document.getElementById("enabled_channel").value || "0", 10),
-    document.getElementById("enabled_channels_csv").value.trim(),
-    parseFloat(document.getElementById("trigger_threshold_v").value || "0"),
-    parseInt(document.getElementById("coincidence_channel").value || "0", 10),
-    parseFloat(document.getElementById("coincidence_threshold_v").value || "0"),
-    parseInt(document.getElementById("sw_trigger_hz").value || "0", 10),
-    mode,
-    duration,
-    target
-  ];
-  const writePaths = PATHS.slice(0, 11);
-  const extraPaths = [
-    "/Equipment/WaveCatcher/Variables/apply_threshold_to_selected",
-    "/Equipment/WaveCatcher/Variables/selected_threshold_v"
-  ];
-  const thr = parseFloat(document.getElementById("trigger_threshold_v").value || "0");
-  const extraVals = [true, thr];
-  document.getElementById("run_duration_s").value = duration;
-  document.getElementById("target_event_count").value = target;
   try {
+    await refreshConfig();
+    if (uiTransitionInProgress !== 0) {
+      alert("Cannot apply while a transition is in progress.");
+      return;
+    }
+    if (uiRunState !== 1) {
+      alert("Stop the run before applying configuration changes.");
+      return;
+    }
+    const mode = parseInt(document.getElementById("auto_stop_mode").value, 10);
+    let duration = parseInt(document.getElementById("run_duration_s").value || "0", 10);
+    let target = parseInt(document.getElementById("target_event_count").value || "0", 10);
+    if (mode === 1) {
+      target = 0;
+    } else if (mode === 2) {
+      duration = 0;
+    } else {
+      duration = 0;
+      target = 0;
+    }
+    const values = [
+      parseInt(document.getElementById("trigger_mode").value, 10),
+      parseInt(document.getElementById("trigger_edge").value, 10),
+      parseInt(document.getElementById("enabled_channel").value || "0", 10),
+      document.getElementById("enabled_channels_csv").value.trim(),
+      parseFloat(document.getElementById("trigger_threshold_v").value || "0"),
+      parseInt(document.getElementById("coincidence_channel").value || "0", 10),
+      parseFloat(document.getElementById("coincidence_threshold_v").value || "0"),
+      parseInt(document.getElementById("sw_trigger_hz").value || "0", 10),
+      mode,
+      duration,
+      target
+    ];
+    const writePaths = PATHS.slice(0, 11);
+    const extraPaths = [
+      "/Equipment/WaveCatcher/Variables/apply_threshold_to_selected",
+      "/Equipment/WaveCatcher/Variables/selected_threshold_v"
+    ];
+    const thr = parseFloat(document.getElementById("trigger_threshold_v").value || "0");
+    const extraVals = [true, thr];
+    document.getElementById("run_duration_s").value = duration;
+    document.getElementById("target_event_count").value = target;
     await mjsonrpc_db_paste(writePaths, values);
     await mjsonrpc_db_paste(extraPaths, extraVals);
     await refreshConfig();
@@ -360,6 +378,19 @@ async function startRunSafe() {
   if (uiBusy) return;
   uiBusy = true;
   try {
+    await refreshConfig();
+    if (uiTransitionInProgress !== 0) {
+      alert("Cannot START: transition already in progress.");
+      return;
+    }
+    if (uiDeviceOpenState !== "ready") {
+      alert(`Cannot START: device_open_state is '${uiDeviceOpenState}' (expected 'ready').`);
+      return;
+    }
+    if (uiRunState === 3) {
+      alert("Run is already running.");
+      return;
+    }
     mhttpd_start_run();
     await new Promise(resolve => setTimeout(resolve, 600));
     await refreshConfig();
@@ -374,6 +405,15 @@ async function stopRunSafe() {
   if (uiBusy) return;
   uiBusy = true;
   try {
+    await refreshConfig();
+    if (uiTransitionInProgress !== 0) {
+      alert("Cannot STOP: transition already in progress.");
+      return;
+    }
+    if (uiRunState !== 3) {
+      alert("Run is not in RUNNING state.");
+      return;
+    }
     mhttpd_stop_run();
     await new Promise(resolve => setTimeout(resolve, 600));
     await refreshConfig();

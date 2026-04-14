@@ -7,6 +7,8 @@
 #include <string>
 #include <sstream>
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 
 #include "midas.h"
 #include "mfe.h"
@@ -75,6 +77,29 @@ static DWORD g_run_start_ms = 0;
 static bool g_stop_transition_requested = false;
 static bool g_shutdown_requested = false;
 static DWORD g_last_live_update_ms = 0;
+static std::recursive_mutex g_wc_api_mutex;
+static std::atomic<bool> g_transition_active {false};
+
+struct TransitionGuard {
+   bool acquired = false;
+   TransitionGuard(char *error, const char *where)
+   {
+      bool expected = false;
+      acquired = g_transition_active.compare_exchange_strong(expected, true);
+      if (!acquired) {
+         if (error) {
+            snprintf(error, 256, "Transition already in progress (%s)", where);
+         }
+         cm_msg(MERROR, "WaveCatcher", "%s rejected: transition already active", where);
+      }
+   }
+   ~TransitionGuard()
+   {
+      if (acquired) {
+         g_transition_active.store(false);
+      }
+   }
+};
 
 static void wc_set_device_open_state_odb()
 {
@@ -386,6 +411,7 @@ static void load_settings_from_odb()
 
 static INT wc_open_device_with_retries()
 {
+   std::lock_guard<std::recursive_mutex> lock(g_wc_api_mutex);
    if (g_device_open) {
       return SUCCESS;
    }
@@ -417,6 +443,7 @@ static INT wc_open_device_with_retries()
 
 static INT wc_force_idle_reset()
 {
+   std::lock_guard<std::recursive_mutex> lock(g_wc_api_mutex);
    cm_msg(MINFO, "WaveCatcher", "calling WAVECAT64CH_ResetDevice()");
    INT st = wc_check(WAVECAT64CH_ResetDevice(), "ResetDevice");
    if (st != SUCCESS) {
@@ -429,6 +456,7 @@ static INT wc_force_idle_reset()
 
 static INT wc_apply_run_configuration()
 {
+   std::lock_guard<std::recursive_mutex> lock(g_wc_api_mutex);
    load_settings_from_odb();
    INT st = SUCCESS;
    bool use_coincidence = (g_trigger_mode_odb == 2);
@@ -555,6 +583,7 @@ static INT wc_apply_run_configuration()
 
 static void wc_stop_close()
 {
+   std::lock_guard<std::recursive_mutex> lock(g_wc_api_mutex);
    if (g_run_active || g_device_open) {
       WAVECAT64CH_ErrCode ec = WAVECAT64CH_StopRun();
       if (ec != WAVECAT64CH_Success) {
@@ -631,6 +660,10 @@ INT frontend_exit(void)
 
 INT begin_of_run(INT run_number, char *error)
 {
+   TransitionGuard transition_guard(error, "begin_of_run");
+   if (!transition_guard.acquired) {
+      return FE_ERR_HW;
+   }
    cm_msg(MINFO, "WaveCatcher", "begin_of_run enter run=%d", run_number);
    DWORD bor_t0 = ss_millitime();
    DWORD t_cfg_ms = 0, t_alloc_ms = 0, t_start_ms = 0;
@@ -657,17 +690,17 @@ INT begin_of_run(INT run_number, char *error)
       return FE_ERR_HW;
    }
    
-    cm_msg(MINFO, "WaveCatcher", "begin_of_run: device already open, applying BOR baseline reset/default");
+   cm_msg(MINFO, "WaveCatcher", "begin_of_run: device already open, applying BOR baseline reset/default");
 
-    INT st = wc_force_idle_reset();
-    if (st != SUCCESS) {
-       snprintf(error, 256, "WaveCatcher reset/default failed");
-       cm_msg(MERROR, "WaveCatcher", "begin_of_run reset/default failed run=%d status=%d",
-              run_number, st);
-       return st;
-    }
+   INT st = wc_force_idle_reset();
+   if (st != SUCCESS) {
+      snprintf(error, 256, "WaveCatcher reset/default failed");
+      cm_msg(MERROR, "WaveCatcher", "begin_of_run reset/default failed run=%d status=%d",
+             run_number, st);
+      return st;
+   }
 
-    st = wc_apply_run_configuration();
+   st = wc_apply_run_configuration();
    t_cfg_ms = ss_millitime() - bor_t0;
    if (st != SUCCESS) {
       snprintf(error, 256, "WaveCatcher init failed");
@@ -714,6 +747,10 @@ INT begin_of_run(INT run_number, char *error)
 
 INT end_of_run(INT run_number, char *error)
 {
+   TransitionGuard transition_guard(error, "end_of_run");
+   if (!transition_guard.acquired) {
+      return FE_ERR_HW;
+   }
    (void)error;
    g_shutdown_requested = false;
    cm_msg(MINFO, "WaveCatcher", "end_of_run enter run=%d", run_number);
@@ -842,11 +879,18 @@ INT poll_event(INT source, INT count, BOOL test)
          DWORD period_ms = (g_sw_trigger_hz > 0) ? (DWORD)(1000 / g_sw_trigger_hz) : 1;
          if (period_ms < 1) period_ms = 1;
          if (now_ms >= g_next_soft_trigger_ms) {
-            WAVECAT64CH_SendSoftwareTrigger();
+            {
+               std::lock_guard<std::recursive_mutex> lock(g_wc_api_mutex);
+               WAVECAT64CH_SendSoftwareTrigger();
+            }
             g_next_soft_trigger_ms = now_ms + period_ms;
          }
       }
-      WAVECAT64CH_ErrCode rc = WAVECAT64CH_ReadEventBuffer();
+      WAVECAT64CH_ErrCode rc = WAVECAT64CH_Success;
+      {
+         std::lock_guard<std::recursive_mutex> lock(g_wc_api_mutex);
+         rc = WAVECAT64CH_ReadEventBuffer();
+      }
       if (rc == WAVECAT64CH_Success) {
          g_event_in_buffer = true;
          g_poll_hits++;
@@ -882,7 +926,11 @@ INT read_wavecatcher_event(char *pevent, INT off)
    }
    g_decode_calls++;
 
-    WAVECAT64CH_ErrCode rc = WAVECAT64CH_DecodeEvent(&g_evt);
+   WAVECAT64CH_ErrCode rc = WAVECAT64CH_Success;
+   {
+      std::lock_guard<std::recursive_mutex> lock(g_wc_api_mutex);
+      rc = WAVECAT64CH_DecodeEvent(&g_evt);
+   }
    if (rc != WAVECAT64CH_Success) {
       cm_msg(MERROR, "WaveCatcher", "DecodeEvent rc=%d", (int)rc);
       g_event_in_buffer = false;
@@ -923,7 +971,10 @@ INT read_wavecatcher_event(char *pevent, INT off)
 
    for (int ch : channels_to_read) {
       WAVECAT64CH_ChannelDataStruct cd {};
-      rc = WAVECAT64CH_ReadChannelDataStruct(&g_evt, ch, &cd);
+      {
+         std::lock_guard<std::recursive_mutex> lock(g_wc_api_mutex);
+         rc = WAVECAT64CH_ReadChannelDataStruct(&g_evt, ch, &cd);
+      }
       if (rc != WAVECAT64CH_Success) {
          continue;
       }
