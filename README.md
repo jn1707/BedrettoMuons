@@ -31,6 +31,24 @@ Custom MIDAS + WaveCatcher integration for Bedretto Muons DAQ, including:
 - Auto-stop mode selection (duration XOR target decoded event count).
 - Live status panel, last-run summary, transfer command helper, and live waveform preview with multi-channel overlay legend.
 
+## ROOT conversion workflow (offline, recommended)
+
+1. Load ROOT environment:
+   - `source scripts/wc_setup_root_env.sh`
+2. Convert a MIDAS run file:
+   - `scripts/wc_convert_mid_to_root.sh --input /home/morenoma/online_wc/run02429.mid.lz4`
+   - Optional post-run hook from CLI runner:
+     - `WC_CONVERT_ROOT_ON_COMPLETE=1 scripts/wc_run_midas_cli.sh ...`
+3. Output:
+   - ROOT file with `TTree` `wc_events` containing:
+     - MIDAS metadata (`midas_serial`, `midas_timestamp`, `midas_event_id`)
+     - WaveCatcher header (`wc_event_id`, `wc_tdc`, `wc_header_nchannels`)
+     - Per-channel features from `WCFE` (`channel_id`, `trig_count`, `time_count`, `baseline`, `peak`, `charge`)
+     - Waveform payload from `WCWF` (`wf_channel`, `wf_offset`, `wf_n_samples`, `wf_samples`)
+   - Histograms: `h_peak_mV`, `h_charge_arb`
+
+This keeps acquisition reliable in `.mid.lz4` while producing ROOT-native analysis files deterministically.
+
 ## Python DAQ branch
 
 A dedicated branch `python-daq` is used to emphasize Python-based DAQ/bridge workflow.  

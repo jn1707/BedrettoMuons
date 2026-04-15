@@ -77,6 +77,8 @@ WC_TR_TOTAL_RUNTIME_MS="${WC_TR_TOTAL_RUNTIME_MS:-180000}"
 WC_CLI_RESTART_STACK="${WC_CLI_RESTART_STACK:-0}"
 WC_CLI_PREFLIGHT="${WC_CLI_PREFLIGHT:-0}"
 WC_CLI_OPEN_SETTLE_S="${WC_CLI_OPEN_SETTLE_S:-10}"
+WC_CONVERT_ROOT_ON_COMPLETE="${WC_CONVERT_ROOT_ON_COMPLETE:-0}"
+WC_ROOT_CONVERT_MAX_EVENTS="${WC_ROOT_CONVERT_MAX_EVENTS:-500000}"
 
 if [[ "${WC_CLI_RESTART_STACK}" == "1" ]] && [[ -x /home/morenoma/Documents/wc_start_midas_stack.sh ]]; then
   /home/morenoma/Documents/wc_start_midas_stack.sh >/dev/null
@@ -285,6 +287,23 @@ PY
 RUNFILE="$(ls -1t /home/morenoma/online_wc/run*.mid.lz4 | head -n 1)"
 echo "$RUNFILE" > "$OUT_DIR/runfile.txt"
 echo "Latest run file: $RUNFILE"
+
+if [[ "${WC_CONVERT_ROOT_ON_COMPLETE}" == "1" ]]; then
+  ROOT_OUT="${RUNFILE%.mid.lz4}.root"
+  if [[ "${ROOT_OUT}" == "${RUNFILE}" ]]; then
+    ROOT_OUT="${RUNFILE}.root"
+  fi
+  if "$(dirname "$0")/wc_convert_mid_to_root.sh" \
+    --input "$RUNFILE" \
+    --output "$ROOT_OUT" \
+    --max-events "$WC_ROOT_CONVERT_MAX_EVENTS" \
+    > "$OUT_DIR/root_convert.log" 2>&1; then
+    echo "$ROOT_OUT" > "$OUT_DIR/rootfile.txt"
+    echo "ROOT conversion complete: $ROOT_OUT"
+  else
+    echo "ROOT conversion failed; see $OUT_DIR/root_convert.log"
+  fi
+fi
 
 echo "Extracting first WCWF bank..."
 if mdump "$RUNFILE" -b WCWF -l 1 > "$OUT_DIR/wcwf_dump.txt" 2>"$OUT_DIR/mdump_err.txt"; then

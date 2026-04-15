@@ -780,3 +780,66 @@ MIDAS+ROOT retry run (requested re-test):
 - Logger settings were restored after test:
   - `/Logger/Channels/0/Settings/Format = MIDAS`
   - `/Logger/Channels/0/Settings/Compress = lz4`
+
+Update: ROOT conversion pipeline implementation started (2026-04-15)
+- Installed user-space ROOT runtime:
+  - `ROOTSYS=/home/morenoma/.local/tools/root`
+  - verified with `root-config --version` (`6.38.04`).
+- Added ROOT environment helper:
+  - `scripts/wc_setup_root_env.sh`
+- Added deterministic MIDAS->ROOT converter:
+  - source: `scripts/wc_mid_to_root.cxx`
+  - wrapper/build runner: `scripts/wc_convert_mid_to_root.sh`
+- Converter behavior:
+  - reads `.mid` and `.mid.lz4` files via ROOTANA `midasio` reader,
+  - extracts WaveCatcher banks:
+    - `WCHD` -> `wc_event_id`, `wc_tdc`, `wc_header_nchannels`,
+    - `WCFE` -> per-channel vectors (`channel_id`, `trig_count`, `time_count`, `baseline`, `peak`, `charge`),
+    - `WCWF` -> waveform vectors (`wf_channel`, `wf_offset`, `wf_n_samples`, `wf_samples`),
+  - writes ROOT file with `TTree` `wc_events`,
+  - writes quick QA histograms `h_peak_mV` and `h_charge_arb`.
+- Added optional operations integration (disabled by default):
+  - `scripts/wc_run_midas_cli.sh` now supports
+    - `WC_CONVERT_ROOT_ON_COMPLETE=1`
+    - `WC_ROOT_CONVERT_MAX_EVENTS=<N>`
+  - when enabled, it auto-runs `wc_convert_mid_to_root.sh` after run stop and records output path/log in run artifact directory.
+- Operational model now implemented as planned:
+  - acquisition remains canonical in MIDAS `.mid.lz4`,
+  - ROOT output is produced by explicit offline conversion step.
+
+Update: ROOT autoconvert hardening + UI/readout updates (2026-04-15)
+- ROOT autoconvert is now enabled by default in stack startup:
+  - `wc_start_midas_stack.sh` starts `wc_root_autoconvert_worker.sh` with `WC_ENABLE_ROOT_AUTOCONVERT=1` default.
+- Autoconvert worker hardening:
+  - added settle/retry behavior to avoid early conversion on files still being finalized by logger,
+  - if converter reports `scanned=0`, worker defers and retries instead of accepting an empty ROOT output.
+- Verified hardware autoconvert path:
+  - MIDAS run `run02432.mid.lz4` (`Events sent = 635`) produced `run02432.root` + `run02432.root.done`,
+  - ROOT tree check: `wc_events` entries = `635`.
+
+Update: operator UX and ODB controls improvements (2026-04-15)
+- Live Monitoring page:
+  - threshold-scan panel removed (scan is now only on Run Controls page).
+- Run Controls page:
+  - added per-channel threshold input:
+    - `/Equipment/WaveCatcher/Variables/channel_thresholds_csv`
+    - format example: `0:0.02,1:0.03`.
+  - added available-channels info row from frontend live ODB:
+    - `/Equipment/WaveCatcher/Live/available_channels_count`
+    - `/Equipment/WaveCatcher/Live/available_channels_csv`.
+  - Apply status row now reports full applied configuration summary (mode, edge, channels, thresholds).
+
+Update: normal-trigger readout behavior (2026-04-15)
+- Frontend event readout path updated so `trigger_mode=normal` reads all channels available in the event,
+  regardless of selected trigger channel.
+- Validation evidence:
+  - run `run02434` with `enabled_channels_csv=0` still produced multi-channel event payload,
+  - available channels published as `0..53`,
+  - converted ROOT events show `channel_id` vector size `48` in sampled entries.
+
+Update: requested two production runs completed (2026-04-15)
+- Run 1 (normal trigger, threshold `20 mV`, CH0): `run02435.mid.lz4`, events `15001`.
+- Run 2 (normal trigger, threshold `20 mV`, CH1): `run02436.mid.lz4`, events `15001`.
+- Corresponding ROOT conversions completed:
+  - `run02435.root` with `wc_events` entries `15001`,
+  - `run02436.root` with `wc_events` entries `15001`.

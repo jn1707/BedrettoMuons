@@ -5,9 +5,10 @@ export MIDAS_EXPTAB=/home/morenoma/online_wc/exptab
 export MIDAS_EXPT_NAME=wavecatcher
 export MIDAS_DIR=/home/morenoma/online_wc
 export PATH=/home/morenoma/packages/midas/bin:$PATH
-export LD_LIBRARY_PATH=/home/morenoma/.local/lib/wavecatcher/v288/lib:/usr/local/lib64
+export LD_LIBRARY_PATH=/home/morenoma/.local/tools/root/lib:/home/morenoma/.local/lib:/home/morenoma/.local/lib/wavecatcher/v288/lib:/usr/local/lib64
 ENABLE_PY_BRIDGE="${WC_ENABLE_PY_BRIDGE:-0}"
 ENABLE_SCAN_WORKER="${WC_ENABLE_SCAN_WORKER:-1}"
+ENABLE_ROOT_AUTOCONVERT="${WC_ENABLE_ROOT_AUTOCONVERT:-1}"
 WC_DISABLE_CUSTOM_CONTROL="${WC_DISABLE_CUSTOM_CONTROL:-0}"
 WC_WD_STARTUP_MS="${WC_WD_STARTUP_MS:-300000}"
 WC_TR_CONNECT_STARTUP_MS="${WC_TR_CONNECT_STARTUP_MS:-300000}"
@@ -72,9 +73,11 @@ stop_pid_file /tmp/wc_midas_frontend.pid
 stop_pid_file /tmp/wc_midas_bridge.pid
 stop_pid_file /tmp/wc_daq_service.pid
 stop_pid_file /tmp/wc_threshold_scan_worker.pid
+stop_pid_file /tmp/wc_root_autoconvert_worker.pid
 stop_matching_cmd "/home/morenoma/Documents/wc_midas_bridge.py --poll 1.0"
 stop_matching_cmd "/home/morenoma/Documents/wc_daq/service.py"
 stop_matching_cmd "/home/morenoma/online_wc/scripts/wc_threshold_scan_worker.sh"
+stop_matching_cmd "/home/morenoma/online_wc/scripts/wc_root_autoconvert_worker.sh"
 stop_matching_cmd "/home/morenoma/online_wc/midas_frontend/wc_midas_frontend"
 stop_matching_cmd "/home/morenoma/online_wc/midas_frontend/wc_midas_frontend -D -e wavecatcher"
 stop_matching_cmd "/home/morenoma/packages/midas/bin/mhttpd -D -e wavecatcher -h localhost:1175"
@@ -182,6 +185,13 @@ if [[ "${ENABLE_SCAN_WORKER}" == "1" ]]; then
   SCAN_WORKER_PID=$!
   echo "${SCAN_WORKER_PID}" > /tmp/wc_threshold_scan_worker.pid
   echo "Threshold scan worker started: pid=${SCAN_WORKER_PID}"
+fi
+
+if [[ "${ENABLE_ROOT_AUTOCONVERT}" == "1" ]]; then
+  setsid /home/morenoma/online_wc/scripts/wc_root_autoconvert_worker.sh > /home/morenoma/online_wc/wc_root_autoconvert_worker.log 2>&1 < /dev/null &
+  ROOT_WORKER_PID=$!
+  echo "${ROOT_WORKER_PID}" > /tmp/wc_root_autoconvert_worker.pid
+  echo "ROOT autoconvert worker started: pid=${ROOT_WORKER_PID}"
 fi
 
 if curl -sS -o /dev/null http://127.0.0.1:8080; then

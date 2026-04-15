@@ -48,6 +48,7 @@
       <div class="row"><span class="lbl">Primary channel</span><input id="enabled_channel" class="box" type="number" min="0" max="63"></div>
       <div class="row"><span class="lbl">Selected channels CSV</span><input id="enabled_channels_csv" class="wide" type="text" placeholder="0,1,2"></div>
       <div class="row"><span class="lbl">Trigger threshold [V]</span><input id="trigger_threshold_v" class="box" type="number" step="0.001"></div>
+      <div class="row"><span class="lbl">Per-channel thresholds CSV</span><input id="channel_thresholds_csv" class="wide" type="text" placeholder="0:0.02,1:0.03,2:0.05"></div>
       <div class="row"><span class="lbl">Coincidence channel</span><input id="coincidence_channel" class="box" type="number" min="0" max="63"></div>
       <div class="row"><span class="lbl">Coincidence threshold [V]</span><input id="coincidence_threshold_v" class="box" type="number" step="0.001"></div>
       <div class="row"><span class="lbl">Software trigger rate [Hz]</span><input id="sw_trigger_hz" class="box" type="number" min="0"></div>
@@ -73,6 +74,7 @@
       <div class="row"><span class="lbl">Run state</span><span id="run_state" class="mono"></span></div>
       <div class="row"><span class="lbl">Transition in progress</span><span id="transition_in_progress" class="mono"></span></div>
       <div class="row"><span class="lbl">Device open state</span><span id="device_open_state" class="mono"></span></div>
+      <div class="row"><span class="lbl">Available channels</span><span id="available_channels_info" class="mono"></span></div>
       <div class="row"><span class="lbl">Help</span><span id="help_text" class="mono"></span></div>
     </td></tr>
   </table>
@@ -110,6 +112,7 @@ const PATHS = [
   "/Equipment/WaveCatcher/Variables/enabled_channel",
   "/Equipment/WaveCatcher/Variables/enabled_channels_csv",
   "/Equipment/WaveCatcher/Variables/trigger_threshold_v",
+  "/Equipment/WaveCatcher/Variables/channel_thresholds_csv",
   "/Equipment/WaveCatcher/Variables/coincidence_channel",
   "/Equipment/WaveCatcher/Variables/coincidence_threshold_v",
   "/Equipment/WaveCatcher/Variables/sw_trigger_hz",
@@ -120,6 +123,8 @@ const PATHS = [
   "/Equipment/WaveCatcher/Variables/ui_last_apply_error",
   "/Equipment/WaveCatcher/Variables/device_open_state_str",
   "/Equipment/WaveCatcher/Variables/help",
+  "/Equipment/WaveCatcher/Live/available_channels_count",
+  "/Equipment/WaveCatcher/Live/available_channels_csv",
   "/Runinfo/State",
   "/Runinfo/Transition in progress",
   "/Scan/Threshold/State",
@@ -151,7 +156,7 @@ function markScanDirty() { scanDirty = true; }
 
 function bindDirtyHandlers() {
   for (const id of [
-    "trigger_mode","trigger_edge","enabled_channel","enabled_channels_csv","trigger_threshold_v",
+    "trigger_mode","trigger_edge","enabled_channel","enabled_channels_csv","trigger_threshold_v","channel_thresholds_csv",
     "coincidence_channel","coincidence_threshold_v","sw_trigger_hz","auto_stop_mode",
     "run_duration_s","target_event_count"
   ]) {
@@ -175,6 +180,9 @@ function updateStatusFromData(data) {
   setText("run_state", stateName(runState));
   setText("transition_in_progress", transitionInProgress);
   setText("device_open_state", deviceOpenState);
+  const availCount = Number(val(data, "/Equipment/WaveCatcher/Live/available_channels_count") || 0);
+  const availCsv = val(data, "/Equipment/WaveCatcher/Live/available_channels_csv") || "";
+  setText("available_channels_info", `${availCount} channels: ${availCsv}`);
   setText("help_text", val(data, "/Equipment/WaveCatcher/Variables/help"));
   setText("scan_state", val(data, "/Scan/Threshold/State") || "");
   setText("scan_progress", val(data, "/Scan/Threshold/ProgressPct") || 0);
@@ -196,6 +204,7 @@ function fillConfigFromData(data, force=false) {
   document.getElementById("enabled_channel").value = val(data, "/Equipment/WaveCatcher/Variables/enabled_channel");
   document.getElementById("enabled_channels_csv").value = val(data, "/Equipment/WaveCatcher/Variables/enabled_channels_csv") || "";
   document.getElementById("trigger_threshold_v").value = val(data, "/Equipment/WaveCatcher/Variables/trigger_threshold_v");
+  document.getElementById("channel_thresholds_csv").value = val(data, "/Equipment/WaveCatcher/Variables/channel_thresholds_csv") || "";
   document.getElementById("coincidence_channel").value = val(data, "/Equipment/WaveCatcher/Variables/coincidence_channel");
   document.getElementById("coincidence_threshold_v").value = val(data, "/Equipment/WaveCatcher/Variables/coincidence_threshold_v");
   document.getElementById("sw_trigger_hz").value = val(data, "/Equipment/WaveCatcher/Variables/sw_trigger_hz");
@@ -242,6 +251,7 @@ async function applyConfig() {
       "/Equipment/WaveCatcher/Variables/enabled_channel",
       "/Equipment/WaveCatcher/Variables/enabled_channels_csv",
       "/Equipment/WaveCatcher/Variables/trigger_threshold_v",
+      "/Equipment/WaveCatcher/Variables/channel_thresholds_csv",
       "/Equipment/WaveCatcher/Variables/coincidence_channel",
       "/Equipment/WaveCatcher/Variables/coincidence_threshold_v",
       "/Equipment/WaveCatcher/Variables/sw_trigger_hz",
@@ -257,6 +267,7 @@ async function applyConfig() {
       Number(document.getElementById("enabled_channel").value || 0),
       document.getElementById("enabled_channels_csv").value.trim(),
       thr,
+      document.getElementById("channel_thresholds_csv").value.trim(),
       Number(document.getElementById("coincidence_channel").value || 0),
       Number(document.getElementById("coincidence_threshold_v").value || 0),
       Number(document.getElementById("sw_trigger_hz").value || 0),
@@ -267,6 +278,13 @@ async function applyConfig() {
       thr
     ];
     await mjsonrpc_db_paste(writePaths, vals);
+    const modeName = ["normal","software","coincidence"][Number(document.getElementById("trigger_mode").value) || 0] || "normal";
+    const edgeName = Number(document.getElementById("trigger_edge").value) === 0 ? "pos" : "neg";
+    const statusText = `mode=${modeName} edge=${edgeName} primary=${Number(document.getElementById("enabled_channel").value || 0)} channels=${document.getElementById("enabled_channels_csv").value.trim()} thr=${thr.toFixed(3)}V ch_thr=${document.getElementById("channel_thresholds_csv").value.trim()}`;
+    await mjsonrpc_db_paste([
+      "/Equipment/WaveCatcher/Variables/ui_last_apply_status",
+      "/Equipment/WaveCatcher/Variables/ui_last_apply_error"
+    ], [statusText, ""]);
     formDirty = false;
     await refresh(true);
   } catch (e) {

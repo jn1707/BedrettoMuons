@@ -10,6 +10,7 @@
 #include <atomic>
 #include <mutex>
 #include <array>
+#include <map>
 
 #include "midas.h"
 #include "mfe.h"
@@ -56,6 +57,7 @@ static int g_run_duration_s = 0; /* 0 disables auto-stop */
 static std::string g_enabled_channels_csv = "";
 static bool g_apply_threshold_to_selected = false;
 static float g_selected_threshold_v = 0.030f;
+static std::string g_channel_thresholds_csv = "";
 static int g_auto_stop_mode = 0; /* 0=none, 1=duration, 2=event_count */
 static int g_target_event_count = 0;
 static std::vector<int> g_active_channels;
@@ -211,6 +213,8 @@ static void wc_update_run_summary(INT run_number)
    wc_set_run_summary_value("enabled_channels_csv", g_enabled_channels_csv.c_str(),
                             (INT)g_enabled_channels_csv.size() + 1, TID_STRING);
    wc_set_run_summary_value("trigger_threshold_v", &g_trigger_threshold_v, sizeof(g_trigger_threshold_v), TID_FLOAT);
+   wc_set_run_summary_value("channel_thresholds_csv", g_channel_thresholds_csv.c_str(),
+                            (INT)g_channel_thresholds_csv.size() + 1, TID_STRING);
    wc_set_run_summary_value("coincidence_channel", &g_coincidence_channel, sizeof(g_coincidence_channel), TID_INT);
    wc_set_run_summary_value("coincidence_threshold_v", &g_coincidence_threshold_v, sizeof(g_coincidence_threshold_v), TID_FLOAT);
    wc_set_run_summary_value("sw_trigger_hz", &g_sw_trigger_hz, sizeof(g_sw_trigger_hz), TID_INT);
@@ -230,6 +234,8 @@ static void ensure_odb_schema_defaults()
                 &apply_sel, sizeof(apply_sel), 1, TID_BOOL);
    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/selected_threshold_v",
                 &g_selected_threshold_v, sizeof(g_selected_threshold_v), 1, TID_FLOAT);
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/channel_thresholds_csv",
+                g_channel_thresholds_csv.c_str(), (INT)g_channel_thresholds_csv.size() + 1, 1, TID_STRING);
    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/auto_stop_mode",
                 &g_auto_stop_mode, sizeof(g_auto_stop_mode), 1, TID_INT);
    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/target_event_count",
@@ -243,6 +249,7 @@ static void ensure_odb_schema_defaults()
       "trigger_edge: 0=pos 1=neg | "
       "trigger_threshold_v=primary threshold | "
       "selected_threshold_v=bulk threshold for enabled_channels_csv if apply_threshold_to_selected=true | "
+      "channel_thresholds_csv=per-channel overrides, e.g. 0:0.02,1:0.03 | "
       "coincidence_threshold_v=partner threshold | "
       "auto_stop_mode: 0=none 1=duration(run_duration_s) 2=event_count(target_event_count)";
     db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/help",
@@ -267,6 +274,7 @@ static void ensure_odb_schema_defaults()
    wc_set_run_summary_value("enabled_channel", &i0, sizeof(i0), TID_INT);
    wc_set_run_summary_value("enabled_channels_csv", "", 1, TID_STRING);
    wc_set_run_summary_value("trigger_threshold_v", &f0, sizeof(f0), TID_FLOAT);
+   wc_set_run_summary_value("channel_thresholds_csv", "", 1, TID_STRING);
    wc_set_run_summary_value("coincidence_channel", &i0, sizeof(i0), TID_INT);
    wc_set_run_summary_value("coincidence_threshold_v", &f0, sizeof(f0), TID_FLOAT);
    wc_set_run_summary_value("sw_trigger_hz", &i0, sizeof(i0), TID_INT);
@@ -281,6 +289,8 @@ static void ensure_odb_schema_defaults()
    wc_set_live_value("preview_waveforms_encoded", "", 1, TID_STRING);
    wc_set_live_value("preview_samples", &i0, sizeof(i0), TID_INT);
    wc_set_live_value("preview_updated_ms", &i0, sizeof(i0), TID_INT);
+   wc_set_live_value("available_channels_count", &i0, sizeof(i0), TID_INT);
+   wc_set_live_value("available_channels_csv", "", 1, TID_STRING);
    const char *warn_txt = "";
    const char *idle_txt = "idle";
    const char *channels_summary = "";
@@ -362,6 +372,52 @@ static std::vector<int> parse_channel_csv(const std::string &csv)
    return out;
 }
 
+static std::map<int, float> parse_channel_threshold_csv(const std::string &csv)
+{
+   std::map<int, float> out;
+   std::stringstream ss(csv);
+   std::string tok;
+   while (std::getline(ss, tok, ',')) {
+      size_t b = tok.find_first_not_of(" \t");
+      if (b == std::string::npos)
+         continue;
+      size_t e = tok.find_last_not_of(" \t");
+      std::string t = tok.substr(b, e - b + 1);
+      size_t sep = t.find(':');
+      if (sep == std::string::npos)
+         continue;
+      std::string chs = t.substr(0, sep);
+      std::string ths = t.substr(sep + 1);
+      char *endp = nullptr;
+      long ch = strtol(chs.c_str(), &endp, 10);
+      if (*chs.c_str() == '\0' || (endp && *endp != '\0'))
+         continue;
+      if (ch < 0 || ch > 63)
+         continue;
+      endp = nullptr;
+      float thr = strtof(ths.c_str(), &endp);
+      if (*ths.c_str() == '\0' || (endp && *endp != '\0'))
+         continue;
+      out[(int)ch] = thr;
+   }
+   return out;
+}
+
+static std::string build_apply_summary()
+{
+   const char *mode = "normal";
+   if (g_trigger_mode_odb == 1) mode = "software";
+   else if (g_trigger_mode_odb == 2) mode = "coincidence";
+   const char *edge = (g_trigger_edge == WAVECAT64CH_POS_EDGE) ? "pos" : "neg";
+   char buf[1024];
+   snprintf(buf, sizeof(buf),
+            "mode=%s edge=%s primary=%d channels=%s thr=%.3fV ch_thr=%s coinc=%d@%.3fV sw=%dHz auto=%d dur=%ds target=%d",
+            mode, edge, g_enabled_channel, g_enabled_channels_csv.c_str(), g_trigger_threshold_v,
+            g_channel_thresholds_csv.c_str(), g_coincidence_channel, g_coincidence_threshold_v,
+            g_sw_trigger_hz, g_auto_stop_mode, g_run_duration_s, g_target_event_count);
+   return std::string(buf);
+}
+
 static void refresh_active_channels()
 {
    std::vector<int> ch = parse_channel_csv(g_enabled_channels_csv);
@@ -400,6 +456,7 @@ static void load_settings_from_odb()
    INT auto_stop_mode = g_auto_stop_mode;
    INT target_event_count = g_target_event_count;
    char channels_csv[256] = "";
+   char channel_thresholds_csv[512] = "";
    char ui_status[256] = "idle";
    char ui_error[256] = "";
    char help_text[512] =
@@ -407,6 +464,7 @@ static void load_settings_from_odb()
       "trigger_edge: 0=pos 1=neg | "
       "trigger_threshold_v=primary threshold | "
       "selected_threshold_v=bulk threshold for enabled_channels_csv if apply_threshold_to_selected=true | "
+      "channel_thresholds_csv=per-channel overrides, e.g. 0:0.02,1:0.03 | "
       "coincidence_threshold_v=partner threshold | "
       "auto_stop_mode: 0=none 1=duration(run_duration_s) 2=event_count(target_event_count)";
 
@@ -458,6 +516,11 @@ static void load_settings_from_odb()
                 channels_csv, &size, TID_STRING, TRUE);
    g_enabled_channels_csv = channels_csv;
    refresh_active_channels();
+
+   size = sizeof(channel_thresholds_csv);
+   db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/channel_thresholds_csv",
+                channel_thresholds_csv, &size, TID_STRING, TRUE);
+   g_channel_thresholds_csv = channel_thresholds_csv;
 
    size = sizeof(apply_thr_selected);
    db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/apply_threshold_to_selected",
@@ -550,6 +613,7 @@ static INT wc_apply_run_configuration()
    INT st = SUCCESS;
    bool use_coincidence = (g_trigger_mode_odb == 2);
    std::vector<int> selected_channels = parse_channel_csv(g_enabled_channels_csv);
+   std::map<int, float> per_channel_thresholds = parse_channel_threshold_csv(g_channel_thresholds_csv);
    if (selected_channels.empty())
       selected_channels.push_back(g_enabled_channel);
    if (std::find(selected_channels.begin(), selected_channels.end(), g_enabled_channel) == selected_channels.end())
@@ -611,6 +675,9 @@ static INT wc_apply_run_configuration()
          return st;
       }
       float thr = g_trigger_threshold_v;
+      auto it = per_channel_thresholds.find(ch);
+      if (it != per_channel_thresholds.end())
+         thr = it->second;
       if (g_apply_threshold_to_selected)
          thr = g_selected_threshold_v;
       cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerThreshold ch=%d thr=%.3f", ch, thr);
@@ -666,7 +733,7 @@ static INT wc_apply_run_configuration()
           g_enabled_channels_csv.c_str(), g_selected_threshold_v, (int)g_apply_threshold_to_selected,
           g_coincidence_channel, g_coincidence_threshold_v, g_run_duration_s,
           g_auto_stop_mode, g_target_event_count);
-   wc_set_ui_status("applied", "");
+   wc_set_ui_status(build_apply_summary(), "");
    return SUCCESS;
 }
 
@@ -1090,18 +1157,32 @@ INT read_wavecatcher_event(char *pevent, INT off)
    feats.reserve((size_t)n_channels * 6);
 
    std::vector<int> channels_to_read;
-   for (int ch : g_active_channels) {
-      if (ch >= 0 && ch < n_channels)
+   if (g_trigger_mode_odb == 0) {
+      for (int ch = 0; ch < n_channels; ch++)
          channels_to_read.push_back(ch);
-   }
-   if (channels_to_read.empty()) {
-      if (g_enabled_channel >= 0 && g_enabled_channel < n_channels) {
-         channels_to_read.push_back(g_enabled_channel);
-      } else {
-         for (int ch = 0; ch < n_channels; ch++)
+   } else {
+      for (int ch : g_active_channels) {
+         if (ch >= 0 && ch < n_channels)
             channels_to_read.push_back(ch);
       }
+      if (channels_to_read.empty()) {
+         if (g_enabled_channel >= 0 && g_enabled_channel < n_channels) {
+            channels_to_read.push_back(g_enabled_channel);
+         } else {
+            for (int ch = 0; ch < n_channels; ch++)
+               channels_to_read.push_back(ch);
+         }
+      }
    }
+
+   std::ostringstream available_csv;
+   for (int ch = 0; ch < n_channels; ch++) {
+      if (ch) available_csv << ",";
+      available_csv << ch;
+   }
+   std::string available = available_csv.str();
+   wc_set_live_value("available_channels_count", &n_channels, sizeof(n_channels), TID_INT);
+   wc_set_live_value("available_channels_csv", available.c_str(), (INT)available.size() + 1, TID_STRING);
 
    for (int ch : channels_to_read) {
       WAVECAT64CH_ChannelDataStruct cd {};
