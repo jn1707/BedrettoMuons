@@ -130,17 +130,10 @@ if [[ -x /home/morenoma/Documents/wc_run_v288.sh ]] && [[ -f /home/morenoma/Docu
   fi
 fi
 
-# Manage custom wc_control page availability.
+# Keep custom control page stable across restarts.
+# Historical toggling via *.disabled could resurrect stale UI snapshots.
 if [[ "${WC_DISABLE_CUSTOM_CONTROL}" == "1" ]]; then
-  if [[ -f /home/morenoma/online_wc/custom/wc_control.html ]] && [[ ! -f /home/morenoma/online_wc/custom/wc_control.html.disabled ]]; then
-    mv /home/morenoma/online_wc/custom/wc_control.html /home/morenoma/online_wc/custom/wc_control.html.disabled
-    echo "Custom wc_control page disabled (CLI-only mode)."
-  fi
-else
-  if [[ -f /home/morenoma/online_wc/custom/wc_control.html.disabled ]] && [[ ! -f /home/morenoma/online_wc/custom/wc_control.html ]]; then
-    mv /home/morenoma/online_wc/custom/wc_control.html.disabled /home/morenoma/online_wc/custom/wc_control.html
-    echo "Custom wc_control page enabled."
-  fi
+  echo "WC_DISABLE_CUSTOM_CONTROL=1 is ignored; keeping /custom/wc_control.html unchanged."
 fi
 
 # Start WaveCatcher MIDAS frontend (direct hardware readout path).
@@ -157,13 +150,13 @@ fi
 echo "${FRONTEND_PID}" > /tmp/wc_midas_frontend.pid
 
 # Clear stale transition lock if any before first run request.
-TRANSITION_IN_PROGRESS="$(odbedit -e wavecatcher -c \"ls '/Runinfo/Transition in progress'\" 2>/dev/null | awk '/Transition in progress/ {print $NF}' || true)"
+TRANSITION_IN_PROGRESS="$(odbedit -q -e wavecatcher -c "ls '/Runinfo/Transition in progress'" 2>/dev/null | awk '/Transition in progress/ {print $NF}' || true)"
 if [[ "${TRANSITION_IN_PROGRESS:-0}" != "0" ]]; then
   odbedit -e wavecatcher -c "set '/Runinfo/Transition in progress' 0" >/dev/null 2>&1 || true
 fi
 
 # If previous session left run in RUNNING state, force STOP once so next START is deterministic.
-RUN_STATE="$(odbedit -e wavecatcher -c \"ls '/Runinfo/State'\" 2>/dev/null | awk '/^State/ {print $NF; exit}' || true)"
+RUN_STATE="$(odbedit -q -e wavecatcher -c "ls '/Runinfo/State'" 2>/dev/null | awk '/^State/ {print $NF; exit}' || true)"
 if [[ "${RUN_STATE:-}" == "3" ]]; then
   timeout 25 mtransition -e wavecatcher STOP >/tmp/wc_stack_forced_stop.log 2>&1 || true
 fi

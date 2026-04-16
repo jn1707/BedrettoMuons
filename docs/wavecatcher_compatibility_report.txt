@@ -843,3 +843,63 @@ Update: requested two production runs completed (2026-04-15)
 - Corresponding ROOT conversions completed:
   - `run02435.root` with `wc_events` entries `15001`,
   - `run02436.root` with `wc_events` entries `15001`.
+
+Update: system snapshot and control hardening (2026-04-16)
+
+Current running stack (live experiment path: `/home/morenoma/online_wc`)
+- `mserver` (RPC server for MIDAS services)
+- `mhttpd` (web UI + JSON-RPC endpoint + custom pages under `/custom/`)
+- `mlogger` (MIDAS logger writing `.mid.lz4`; optional MIDAS ROOT logger mode still not producing reliable `.root` files on this setup)
+- `wc_midas_frontend` (native WaveCatcher frontend; direct hardware readout path)
+- `wc_threshold_scan_worker.sh` (scan orchestrator using ODB request/state keys)
+- `wc_root_autoconvert_worker.sh` (post-run `.mid(.lz4)` -> `.root` conversion worker)
+
+Data and control flow sketch
+
+  WaveCatcher HW
+       |
+       v
+  wc_midas_frontend  <---- ODB config (/Equipment/WaveCatcher/Variables/*)
+       |   \
+       |    +----> ODB live/status (/Equipment/WaveCatcher/Live/*, RunSummary/*)
+       v
+  MIDAS event buffer
+       |
+       +----> mlogger ----> runXXXXX.mid.lz4
+       |                       |
+       |                       +----> wc_root_autoconvert_worker
+       |                                |
+       |                                +----> runXXXXX.root (TTree wc_events)
+       |
+       +----> mhttpd custom UI (/custom/wc_control.html, /wc_monitoring.html, /wc_summary.html)
+
+Key web UI features now active
+- Guided channel-button selection (toggle per channel, selected channels persisted to ODB CSV).
+- Per-action apply buttons:
+  - apply trigger mode to selected channels
+  - apply threshold to selected channels
+  - apply trigger edge to selected channels
+- Apply status is cumulative and reports combined settings (mode/edge/channels/primary/coincidence/threshold map).
+- Reset button for fast return to baseline settings.
+- Threshold scan panel includes trigger-mode selector (normal/coincidence).
+- Available channels shown from hardware-backed frontend publication.
+
+Important frontend behavior/status
+- Normal trigger readout path keeps all decoded channels in the event payload.
+- Coincidence mode:
+  - 2 selected channels => hardware coincidence mode
+  - >2 selected channels => hardware majority trigger mode for N-channel coincidence operation
+- Hardware channel publication stabilized:
+  - frontend now reads `WAVECAT64CH_GetDeviceInfo()` and publishes `NbOfFeChannels`
+  - live ODB now reports `available_channels_count=48`, `available_channels_csv=0..47` on current hardware
+
+Operational hardening updates
+- Removed `wc_control.html`/`wc_control.html.disabled` startup swapping from stack launcher (this previously could resurrect stale UI revisions).
+- mhttpd resources required by custom pages are present in experiment `custom/`:
+  - `messages.js`
+  - `spinning-wheel.gif`
+
+Notes for MIDAS expert review / next extensions
+- Evaluate whether majority trigger threshold should be explicitly configurable in frontend ODB (library support differs by version/build).
+- Consider adding an explicit ODB key for “hardware channel count source” and exposing it in UI diagnostics.
+- Consider moving ROOT conversion worker status into dedicated ODB subtree for richer operator visibility (queue, retries, last failure reason).

@@ -28,7 +28,7 @@ while true; do
     run_num="$(basename "${run_base}")"
     out_root="${run_base}.root"
     done_marker="${run_base}.root.done"
-    running_state="$(odbedit -e wavecatcher -c \"ls '/Runinfo/State'\" 2>/dev/null | awk '/^State/ {print $NF; exit}' || true)"
+    running_state="$(odbedit -q -e wavecatcher -c "ls '/Runinfo/State'" 2>/dev/null | awk '/^State/ {print $NF; exit}' || true)"
 
     if [[ "${run_num}" != "${last_run}" && "${running_state:-}" != "3" ]]; then
       if [[ -f "${out_root}" && -f "${done_marker}" ]]; then

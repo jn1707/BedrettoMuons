@@ -61,6 +61,7 @@ static std::string g_channel_thresholds_csv = "";
 static int g_auto_stop_mode = 0; /* 0=none, 1=duration, 2=event_count */
 static int g_target_event_count = 0;
 static std::vector<int> g_active_channels;
+static int g_hw_front_channels = 0;
 static std::string g_ui_last_apply_status = "uninitialized";
 static std::string g_ui_last_apply_error = "";
 static bool g_event_in_buffer = false;
@@ -245,12 +246,13 @@ static void ensure_odb_schema_defaults()
    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/ui_last_apply_error",
                 empty, 1, 1, TID_STRING);
    const char *help =
-      "trigger_mode: 0=normal 1=software 2=coincidence(2-channel: primary+partner) | "
+      "trigger_mode: 0=normal 1=software 2=coincidence(2-channel) or majority(N-channel via selected channels) | "
       "trigger_edge: 0=pos 1=neg | "
       "trigger_threshold_v=primary threshold | "
       "selected_threshold_v=bulk threshold for enabled_channels_csv if apply_threshold_to_selected=true | "
       "channel_thresholds_csv=per-channel overrides, e.g. 0:0.02,1:0.03 | "
       "coincidence_threshold_v=partner threshold | "
+      "Apply buttons are cumulative: use mode/edge/threshold buttons sequentially, then start run | "
       "auto_stop_mode: 0=none 1=duration(run_duration_s) 2=event_count(target_event_count)";
     db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/help",
                  help, (INT)strlen(help) + 1, 1, TID_STRING);
@@ -330,6 +332,7 @@ static void ensure_odb_schema_defaults()
    INT dwell_s = 2;
    db_set_value(hDB, 0, "/Scan/Threshold/DwellS", &dwell_s, sizeof(dwell_s), 1, TID_INT);
    db_set_value(hDB, 0, "/Scan/Threshold/ChannelsCsv", "", 1, 1, TID_STRING);
+   db_set_value(hDB, 0, "/Scan/Threshold/TriggerMode", &i0, sizeof(i0), 1, TID_INT);
    db_set_value(hDB, 0, "/Scan/Threshold/ProgressPct", &i0, sizeof(i0), 1, TID_INT);
    db_set_value(hDB, 0, "/Scan/Threshold/ResultCsvPath", "", 1, 1, TID_STRING);
    db_set_value(hDB, 0, "/Scan/Threshold/ResultPlotPath", "", 1, 1, TID_STRING);
@@ -403,6 +406,33 @@ static std::map<int, float> parse_channel_threshold_csv(const std::string &csv)
    return out;
 }
 
+static int wc_effective_hw_channels()
+{
+   int n = g_hw_front_channels;
+   if (n < 0)
+      n = 0;
+   if (n > WAVECAT64CH_MAX_TOTAL_NB_OF_CHANNELS)
+      n = WAVECAT64CH_MAX_TOTAL_NB_OF_CHANNELS;
+   return n;
+}
+
+static void wc_publish_available_channels(int n_channels)
+{
+   if (n_channels < 0)
+      n_channels = 0;
+   if (n_channels > WAVECAT64CH_MAX_TOTAL_NB_OF_CHANNELS)
+      n_channels = WAVECAT64CH_MAX_TOTAL_NB_OF_CHANNELS;
+   std::ostringstream available_csv;
+   for (int ch = 0; ch < n_channels; ch++) {
+      if (ch)
+         available_csv << ",";
+      available_csv << ch;
+   }
+   std::string available = available_csv.str();
+   wc_set_live_value("available_channels_count", &n_channels, sizeof(n_channels), TID_INT);
+   wc_set_live_value("available_channels_csv", available.c_str(), (INT)available.size() + 1, TID_STRING);
+}
+
 static std::string build_apply_summary()
 {
    const char *mode = "normal";
@@ -459,13 +489,14 @@ static void load_settings_from_odb()
    char channel_thresholds_csv[512] = "";
    char ui_status[256] = "idle";
    char ui_error[256] = "";
-   char help_text[512] =
-      "trigger_mode: 0=normal 1=software 2=coincidence(2-channel: primary+partner) | "
+   char help_text[1024] =
+      "trigger_mode: 0=normal 1=software 2=coincidence(2-channel) or majority(N-channel via selected channels) | "
       "trigger_edge: 0=pos 1=neg | "
       "trigger_threshold_v=primary threshold | "
       "selected_threshold_v=bulk threshold for enabled_channels_csv if apply_threshold_to_selected=true | "
       "channel_thresholds_csv=per-channel overrides, e.g. 0:0.02,1:0.03 | "
       "coincidence_threshold_v=partner threshold | "
+      "Apply buttons are cumulative: use mode/edge/threshold buttons sequentially, then start run | "
       "auto_stop_mode: 0=none 1=duration(run_duration_s) 2=event_count(target_event_count)";
 
    size = sizeof(threshold);
@@ -586,6 +617,19 @@ static INT wc_open_device_with_retries()
    st = wc_check(WAVECAT64CH_SetDefaultParameters(), "SetDefaultParameters");
    if (st != SUCCESS) return st;
 
+   WAVECAT64CH_DeviceInfoStruct info {};
+   st = wc_check(WAVECAT64CH_GetDeviceInfo(&info), "GetDeviceInfo");
+   if (st == SUCCESS) {
+      g_hw_front_channels = info.NbOfFeChannels;
+      cm_msg(MINFO, "WaveCatcher",
+             "Device info: system=%d fe_boards=%d fe_channels=%d back_extra_channels=%d fe_sam_blocks=%d",
+             (int)info.SystemType, info.NbOfFeBoards, info.NbOfFeChannels,
+             info.NbOfBackExtraChannels, info.NbOfFeSamBlocks);
+      wc_publish_available_channels(wc_effective_hw_channels());
+   } else {
+      g_hw_front_channels = 0;
+   }
+
    /* Mark device ready for run-time API calls only after full open sequence succeeds. */
    g_device_open = true;
    return SUCCESS;
@@ -618,6 +662,9 @@ static INT wc_apply_run_configuration()
       selected_channels.push_back(g_enabled_channel);
    if (std::find(selected_channels.begin(), selected_channels.end(), g_enabled_channel) == selected_channels.end())
       selected_channels.push_back(g_enabled_channel);
+   std::sort(selected_channels.begin(), selected_channels.end());
+   selected_channels.erase(std::unique(selected_channels.begin(), selected_channels.end()), selected_channels.end());
+   const bool use_majority = use_coincidence && selected_channels.size() > 2;
 
    wc_set_ui_status("applying", "");
 
@@ -632,7 +679,7 @@ static INT wc_apply_run_configuration()
       }
    }
 
-   if (use_coincidence && g_coincidence_channel != g_enabled_channel) {
+   if (use_coincidence && !use_majority && g_coincidence_channel != g_enabled_channel) {
       cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetChannelState coincidence_ch=%d", g_coincidence_channel);
       st = wc_check(
          WAVECAT64CH_SetChannelState(WAVECAT64CH_FRONT_CHANNEL, g_coincidence_channel, WAVECAT64CH_STATE_ON),
@@ -654,7 +701,7 @@ static INT wc_apply_run_configuration()
       }
    }
 
-   if (use_coincidence && g_coincidence_channel != g_enabled_channel) {
+   if (use_coincidence && !use_majority && g_coincidence_channel != g_enabled_channel) {
       cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerSourceState coincidence_ch=%d", g_coincidence_channel);
       st = wc_check(
          WAVECAT64CH_SetTriggerSourceState(WAVECAT64CH_FRONT_CHANNEL, g_coincidence_channel, WAVECAT64CH_STATE_ON),
@@ -690,7 +737,7 @@ static INT wc_apply_run_configuration()
       }
    }
 
-   if (use_coincidence && g_coincidence_channel != g_enabled_channel) {
+   if (use_coincidence && !use_majority && g_coincidence_channel != g_enabled_channel) {
       cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerEdge coincidence_ch=%d edge=%d", g_coincidence_channel, (int)g_trigger_edge);
       st = wc_check(
          WAVECAT64CH_SetTriggerEdge(WAVECAT64CH_FRONT_CHANNEL, g_coincidence_channel, g_trigger_edge),
@@ -709,10 +756,12 @@ static INT wc_apply_run_configuration()
 
    WAVECAT64CH_TriggerType trig_mode = WAVECAT64CH_TRIGGER_NORMAL;
    if (use_coincidence) {
-      trig_mode = WAVECAT64CH_TRIGGER_COINCIDENCE;
+      trig_mode = use_majority ? WAVECAT64CH_TRIGGER_MAJORITY : WAVECAT64CH_TRIGGER_COINCIDENCE;
    } else if (g_sw_trigger_hz > 0 || g_trigger_mode_odb == 1) {
       trig_mode = WAVECAT64CH_TRIGGER_SOFT;
    }
+   if (use_majority)
+      cm_msg(MINFO, "WaveCatcher", "Applying N-channel coincidence using MAJORITY mode on selected channels");
    cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerMode mode=%d", (int)trig_mode);
    st = wc_check(WAVECAT64CH_SetTriggerMode(trig_mode), "SetTriggerMode");
    if (st != SUCCESS) return st;
@@ -1153,36 +1202,41 @@ INT read_wavecatcher_event(char *pevent, INT off)
 
    std::vector<float> feats;
    std::vector<float> wave;
-   int n_channels = g_evt.NbOfSAMBlocksInEvent * 2;
-   feats.reserve((size_t)n_channels * 6);
+   int event_channels = g_evt.NbOfSAMBlocksInEvent * 2;
+   if (event_channels < 0)
+      event_channels = 0;
+   if (event_channels > WAVECAT64CH_MAX_TOTAL_NB_OF_CHANNELS)
+      event_channels = WAVECAT64CH_MAX_TOTAL_NB_OF_CHANNELS;
+   int read_channels = event_channels;
+   if (read_channels <= 0) {
+      int hw_channels = wc_effective_hw_channels();
+      if (hw_channels > 0)
+         read_channels = hw_channels;
+   }
+   int publish_channels = wc_effective_hw_channels();
+   if (publish_channels <= 0)
+      publish_channels = read_channels;
+   feats.reserve((size_t)read_channels * 6);
 
    std::vector<int> channels_to_read;
    if (g_trigger_mode_odb == 0) {
-      for (int ch = 0; ch < n_channels; ch++)
+      for (int ch = 0; ch < read_channels; ch++)
          channels_to_read.push_back(ch);
    } else {
       for (int ch : g_active_channels) {
-         if (ch >= 0 && ch < n_channels)
+         if (ch >= 0 && ch < read_channels)
             channels_to_read.push_back(ch);
       }
       if (channels_to_read.empty()) {
-         if (g_enabled_channel >= 0 && g_enabled_channel < n_channels) {
+         if (g_enabled_channel >= 0 && g_enabled_channel < read_channels) {
             channels_to_read.push_back(g_enabled_channel);
          } else {
-            for (int ch = 0; ch < n_channels; ch++)
+            for (int ch = 0; ch < read_channels; ch++)
                channels_to_read.push_back(ch);
          }
       }
    }
-
-   std::ostringstream available_csv;
-   for (int ch = 0; ch < n_channels; ch++) {
-      if (ch) available_csv << ",";
-      available_csv << ch;
-   }
-   std::string available = available_csv.str();
-   wc_set_live_value("available_channels_count", &n_channels, sizeof(n_channels), TID_INT);
-   wc_set_live_value("available_channels_csv", available.c_str(), (INT)available.size() + 1, TID_STRING);
+   wc_publish_available_channels(publish_channels);
 
    for (int ch : channels_to_read) {
       WAVECAT64CH_ChannelDataStruct cd {};

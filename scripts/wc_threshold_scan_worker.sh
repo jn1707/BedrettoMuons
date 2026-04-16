@@ -24,7 +24,7 @@ odb_get() {
   local path="$1"
   local key
   key="$(basename "$path")"
-  odbedit -e wavecatcher -c "ls '$path'" 2>/dev/null | awk -v key="$key" '
+  odbedit -q -e wavecatcher -c "ls '$path'" 2>/dev/null | awk -v key="$key" '
     index($0, key) == 1 {
       line=$0
       sub("^" key "[[:space:]]+", "", line)
@@ -46,13 +46,13 @@ odb_get_num() {
 odb_set() {
   local path="$1"
   local value="$2"
-  odbedit -e wavecatcher -c "set '$path' $value" >/dev/null 2>&1
+  odbedit -q -e wavecatcher -c "set '$path' $value" >/dev/null 2>&1
 }
 
 odb_set_str() {
   local path="$1"
   local value="$2"
-  odbedit -e wavecatcher -c "set '$path' \"$value\"" >/dev/null 2>&1
+  odbedit -q -e wavecatcher -c "set '$path' \"$value\"" >/dev/null 2>&1
 }
 
 get_run_state() {
@@ -164,10 +164,31 @@ run_one_threshold() {
   local thr="$1"
   local dwell_s="$2"
   local channels_csv="$3"
-  local stamp="$4"
-  local idx="$5"
-  local csv_file="$6"
+  local scan_mode="$4"
+  local stamp="$5"
+  local idx="$6"
+  local csv_file="$7"
+  local primary_ch coincidence_ch
 
+  primary_ch="$(python3 - "$channels_csv" <<'PY'
+import sys
+vals=[v.strip() for v in sys.argv[1].split(",") if v.strip()]
+print(vals[0] if vals else "0")
+PY
+)"
+  coincidence_ch="$(python3 - "$channels_csv" <<'PY'
+import sys
+vals=[v.strip() for v in sys.argv[1].split(",") if v.strip()]
+print(vals[1] if len(vals) > 1 else (vals[0] if vals else "0"))
+PY
+)"
+
+  if [[ "${scan_mode}" != "2" ]]; then
+    scan_mode="0"
+  fi
+  odb_set "/Equipment/WaveCatcher/Variables/trigger_mode" "${scan_mode}"
+  odb_set "/Equipment/WaveCatcher/Variables/enabled_channel" "${primary_ch}"
+  odb_set "/Equipment/WaveCatcher/Variables/coincidence_channel" "${coincidence_ch}"
   odb_set "/Equipment/WaveCatcher/Variables/trigger_threshold_v" "${thr}"
   odb_set "/Equipment/WaveCatcher/Variables/selected_threshold_v" "${thr}"
   odb_set "/Equipment/WaveCatcher/Variables/coincidence_threshold_v" "${thr}"
@@ -234,6 +255,7 @@ while true; do
   step_v="$(odb_get_num "/Scan/Threshold/StepV")"
   dwell_s="$(odb_get_num "/Scan/Threshold/DwellS")"
   channels_csv="$(odb_get "/Scan/Threshold/ChannelsCsv" || true)"
+  scan_mode="$(odb_get_num "/Scan/Threshold/TriggerMode")"
   if [[ -z "${channels_csv:-}" ]]; then
     channels_csv="$(odb_get "/Equipment/WaveCatcher/Variables/enabled_channels_csv" || true)"
   fi
@@ -252,6 +274,10 @@ PY
     odb_set_str "/Scan/Threshold/State" "failed"
     odb_set "/Scan/Threshold/Request" "0"
     continue
+  fi
+
+  if [[ "${scan_mode}" != "2" ]]; then
+    scan_mode="0"
   fi
 
   stamp="$(date +%Y%m%d_%H%M%S)"
@@ -297,7 +323,7 @@ PY
     idx=$((idx + 1))
     pct=$(( (idx - 1) * 100 / total ))
     odb_set "/Scan/Threshold/ProgressPct" "${pct}"
-    if ! run_one_threshold "$thr" "$dwell_s" "$channels_csv" "$stamp" "$idx" "$csv_file"; then
+    if ! run_one_threshold "$thr" "$dwell_s" "$channels_csv" "$scan_mode" "$stamp" "$idx" "$csv_file"; then
       ok=0
       break
     fi

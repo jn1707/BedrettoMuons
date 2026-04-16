@@ -14,6 +14,9 @@
     .mono { font-family:monospace; }
     .hint { color:#555; font-size:90%; margin-left:230px; }
     .nav a { margin-right:12px; }
+    .ch-grid { display:flex; flex-wrap:wrap; gap:6px; }
+    .ch-btn { min-width:52px; }
+    .ch-btn.selected { background:#1976d2; color:#fff; border-color:#115293; }
   </style>
 </head>
 <body class="mcss" onload="initPage()">
@@ -45,12 +48,12 @@
           <option value="1">Negative</option>
         </select>
       </div>
-      <div class="row"><span class="lbl">Primary channel</span><input id="enabled_channel" class="box" type="number" min="0" max="63"></div>
-      <div class="row"><span class="lbl">Selected channels CSV</span><input id="enabled_channels_csv" class="wide" type="text" placeholder="0,1,2"></div>
+      <div class="row"><span class="lbl">Selected channels</span><div id="channel_buttons" class="ch-grid"></div></div>
+      <div class="row"><span class="lbl">Primary channel (auto: first selected)</span><input id="enabled_channel" class="box" type="number" min="0" max="63"></div>
+      <div class="row"><span class="lbl">Selected channels CSV</span><input id="enabled_channels_csv" class="wide mono" type="text" placeholder="0,1,2"></div>
       <div class="row"><span class="lbl">Trigger threshold [V]</span><input id="trigger_threshold_v" class="box" type="number" step="0.001"></div>
       <div class="row"><span class="lbl">Per-channel thresholds CSV</span><input id="channel_thresholds_csv" class="wide" type="text" placeholder="0:0.02,1:0.03,2:0.05"></div>
       <div class="row"><span class="lbl">Coincidence channel</span><input id="coincidence_channel" class="box" type="number" min="0" max="63"></div>
-      <div class="row"><span class="lbl">Coincidence threshold [V]</span><input id="coincidence_threshold_v" class="box" type="number" step="0.001"></div>
       <div class="row"><span class="lbl">Software trigger rate [Hz]</span><input id="sw_trigger_hz" class="box" type="number" min="0"></div>
       <div class="row"><span class="lbl">Auto stop mode</span>
         <select id="auto_stop_mode" class="box">
@@ -63,8 +66,14 @@
       <div class="row"><span class="lbl">Target decoded events</span><input id="target_event_count" class="box" type="number" min="0"></div>
 
       <div class="row">
+        <button class="mbutton" onclick="applyTriggerModeSelected()">Apply trigger mode to selected</button>
+        <button class="mbutton" onclick="applyThresholdSelected()">Apply threshold to selected</button>
+        <button class="mbutton" onclick="applyTriggerEdgeSelected()">Apply edge to selected</button>
+      </div>
+      <div class="row">
         <button class="mbutton" onclick="applyConfig()">Apply to ODB</button>
         <button class="mbutton" onclick="reloadConfig()">Reload from ODB</button>
+        <button class="mbutton" onclick="resetSettings()">Reset all settings</button>
         <button class="mbutton" onclick="startRunSafe()">Start</button>
         <button class="mbutton" onclick="stopRunSafe()">Stop</button>
       </div>
@@ -90,6 +99,12 @@
       <div class="row"><span class="lbl">Dwell [s] / Channels CSV</span>
         <input id="scan_dwell_s" class="box" type="number" min="1">
         <input id="scan_channels_csv" class="wide" type="text" placeholder="0,1">
+      </div>
+      <div class="row"><span class="lbl">Scan trigger mode</span>
+        <select id="scan_trigger_mode" class="box">
+          <option value="0">Normal</option>
+          <option value="2">Coincidence</option>
+        </select>
       </div>
       <div class="row">
         <button class="mbutton" onclick="applyScanSettings()">Apply scan settings</button>
@@ -136,7 +151,8 @@ const PATHS = [
   "/Scan/Threshold/StopV",
   "/Scan/Threshold/StepV",
   "/Scan/Threshold/DwellS",
-  "/Scan/Threshold/ChannelsCsv"
+  "/Scan/Threshold/ChannelsCsv",
+  "/Scan/Threshold/TriggerMode"
 ];
 const IDX = Object.fromEntries(PATHS.map((p, i) => [p, i]));
 
@@ -146,6 +162,54 @@ let scanDirty = false;
 let runState = 1;
 let transitionInProgress = 0;
 let deviceOpenState = "idle";
+let selectedChannels = [];
+let availableChannels = [...Array(64).keys()];
+
+function parseChannelCsv(csv) {
+  return String(csv || "")
+    .split(",")
+    .map(s => Number(s.trim()))
+    .filter(v => Number.isInteger(v) && v >= 0 && v <= 63)
+    .filter((v, i, a) => a.indexOf(v) === i)
+    .sort((a, b) => a - b);
+}
+
+function channelsCsv(list) {
+  return list.join(",");
+}
+
+function setSelectedChannels(list) {
+  selectedChannels = parseChannelCsv(channelsCsv(list));
+  const csv = channelsCsv(selectedChannels);
+  document.getElementById("enabled_channels_csv").value = csv;
+  if (selectedChannels.length > 0) {
+    document.getElementById("enabled_channel").value = selectedChannels[0];
+  }
+  const scanCsv = document.getElementById("scan_channels_csv");
+  if (scanCsv && !scanDirty) scanCsv.value = csv;
+}
+
+function toggleChannel(ch) {
+  const i = selectedChannels.indexOf(ch);
+  if (i >= 0) selectedChannels.splice(i, 1);
+  else selectedChannels.push(ch);
+  setSelectedChannels(selectedChannels);
+  renderChannelButtons();
+  formDirty = true;
+}
+
+function renderChannelButtons() {
+  const host = document.getElementById("channel_buttons");
+  host.innerHTML = "";
+  for (const ch of availableChannels) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "mbutton ch-btn" + (selectedChannels.includes(ch) ? " selected" : "");
+    b.textContent = `CH${ch}`;
+    b.onclick = () => toggleChannel(ch);
+    host.appendChild(b);
+  }
+}
 
 function val(data, path) { return data[IDX[path]]; }
 function setText(id, v) { document.getElementById(id).textContent = (v == null) ? "" : String(v); }
@@ -157,14 +221,14 @@ function markScanDirty() { scanDirty = true; }
 function bindDirtyHandlers() {
   for (const id of [
     "trigger_mode","trigger_edge","enabled_channel","enabled_channels_csv","trigger_threshold_v","channel_thresholds_csv",
-    "coincidence_channel","coincidence_threshold_v","sw_trigger_hz","auto_stop_mode",
+    "coincidence_channel","sw_trigger_hz","auto_stop_mode",
     "run_duration_s","target_event_count"
   ]) {
     const el = document.getElementById(id);
     el.addEventListener("input", markDirty);
     el.addEventListener("change", markDirty);
   }
-  for (const id of ["scan_start_v","scan_stop_v","scan_step_v","scan_dwell_s","scan_channels_csv"]) {
+  for (const id of ["scan_start_v","scan_stop_v","scan_step_v","scan_dwell_s","scan_channels_csv","scan_trigger_mode"]) {
     const el = document.getElementById(id);
     el.addEventListener("input", markScanDirty);
     el.addEventListener("change", markScanDirty);
@@ -182,7 +246,19 @@ function updateStatusFromData(data) {
   setText("device_open_state", deviceOpenState);
   const availCount = Number(val(data, "/Equipment/WaveCatcher/Live/available_channels_count") || 0);
   const availCsv = val(data, "/Equipment/WaveCatcher/Live/available_channels_csv") || "";
+  let parsedAvail = parseChannelCsv(availCsv);
+  if (!parsedAvail.length && availCount > 0) {
+    parsedAvail = [...Array(Math.min(availCount, 64)).keys()];
+  }
+  if (parsedAvail.length === 1 && availCount > 1) {
+    parsedAvail = [...Array(Math.min(availCount, 64)).keys()];
+  }
+  if (!parsedAvail.length) {
+    parsedAvail = [...Array(64).keys()];
+  }
+  availableChannels = parsedAvail;
   setText("available_channels_info", `${availCount} channels: ${availCsv}`);
+  renderChannelButtons();
   setText("help_text", val(data, "/Equipment/WaveCatcher/Variables/help"));
   setText("scan_state", val(data, "/Scan/Threshold/State") || "");
   setText("scan_progress", val(data, "/Scan/Threshold/ProgressPct") || 0);
@@ -202,11 +278,10 @@ function fillConfigFromData(data, force=false) {
   document.getElementById("trigger_mode").value = String(val(data, "/Equipment/WaveCatcher/Variables/trigger_mode"));
   document.getElementById("trigger_edge").value = String(val(data, "/Equipment/WaveCatcher/Variables/trigger_edge"));
   document.getElementById("enabled_channel").value = val(data, "/Equipment/WaveCatcher/Variables/enabled_channel");
-  document.getElementById("enabled_channels_csv").value = val(data, "/Equipment/WaveCatcher/Variables/enabled_channels_csv") || "";
+  setSelectedChannels(parseChannelCsv(val(data, "/Equipment/WaveCatcher/Variables/enabled_channels_csv") || ""));
   document.getElementById("trigger_threshold_v").value = val(data, "/Equipment/WaveCatcher/Variables/trigger_threshold_v");
   document.getElementById("channel_thresholds_csv").value = val(data, "/Equipment/WaveCatcher/Variables/channel_thresholds_csv") || "";
   document.getElementById("coincidence_channel").value = val(data, "/Equipment/WaveCatcher/Variables/coincidence_channel");
-  document.getElementById("coincidence_threshold_v").value = val(data, "/Equipment/WaveCatcher/Variables/coincidence_threshold_v");
   document.getElementById("sw_trigger_hz").value = val(data, "/Equipment/WaveCatcher/Variables/sw_trigger_hz");
   document.getElementById("auto_stop_mode").value = String(val(data, "/Equipment/WaveCatcher/Variables/auto_stop_mode"));
   document.getElementById("run_duration_s").value = val(data, "/Equipment/WaveCatcher/Variables/run_duration_s");
@@ -217,6 +292,7 @@ function fillConfigFromData(data, force=false) {
     document.getElementById("scan_step_v").value = val(data, "/Scan/Threshold/StepV");
     document.getElementById("scan_dwell_s").value = val(data, "/Scan/Threshold/DwellS");
     document.getElementById("scan_channels_csv").value = val(data, "/Scan/Threshold/ChannelsCsv") || "";
+    document.getElementById("scan_trigger_mode").value = String(val(data, "/Scan/Threshold/TriggerMode") || 0);
   }
 }
 
@@ -265,11 +341,11 @@ async function applyConfig() {
       Number(document.getElementById("trigger_mode").value),
       Number(document.getElementById("trigger_edge").value),
       Number(document.getElementById("enabled_channel").value || 0),
-      document.getElementById("enabled_channels_csv").value.trim(),
+      channelsCsv(selectedChannels),
       thr,
       document.getElementById("channel_thresholds_csv").value.trim(),
-      Number(document.getElementById("coincidence_channel").value || 0),
-      Number(document.getElementById("coincidence_threshold_v").value || 0),
+      Number(document.getElementById("coincidence_channel").value || (selectedChannels[1] ?? selectedChannels[0] ?? 0)),
+      thr,
       Number(document.getElementById("sw_trigger_hz").value || 0),
       mode,
       duration,
@@ -278,9 +354,7 @@ async function applyConfig() {
       thr
     ];
     await mjsonrpc_db_paste(writePaths, vals);
-    const modeName = ["normal","software","coincidence"][Number(document.getElementById("trigger_mode").value) || 0] || "normal";
-    const edgeName = Number(document.getElementById("trigger_edge").value) === 0 ? "pos" : "neg";
-    const statusText = `mode=${modeName} edge=${edgeName} primary=${Number(document.getElementById("enabled_channel").value || 0)} channels=${document.getElementById("enabled_channels_csv").value.trim()} thr=${thr.toFixed(3)}V ch_thr=${document.getElementById("channel_thresholds_csv").value.trim()}`;
+    const statusText = buildCombinedStatus();
     await mjsonrpc_db_paste([
       "/Equipment/WaveCatcher/Variables/ui_last_apply_status",
       "/Equipment/WaveCatcher/Variables/ui_last_apply_error"
@@ -292,6 +366,149 @@ async function applyConfig() {
   } finally {
     uiBusy = false;
   }
+}
+
+function selectedPrimary() {
+  return selectedChannels[0] ?? Number(document.getElementById("enabled_channel").value || 0);
+}
+
+function selectedCoincidence() {
+  return selectedChannels[1] ?? selectedPrimary();
+}
+
+function buildCombinedStatus() {
+  const mode = Number(document.getElementById("trigger_mode").value || 0);
+  const modeName = ["normal","software","coincidence"][mode] || "normal";
+  const edgeName = Number(document.getElementById("trigger_edge").value || 0) === 0 ? "pos" : "neg";
+  const thr = Number(document.getElementById("trigger_threshold_v").value || 0);
+  const chThr = document.getElementById("channel_thresholds_csv").value.trim();
+  return `mode=${modeName} edge=${edgeName} channels=${channelsCsv(selectedChannels)} primary=${selectedPrimary()} coincidence=${selectedCoincidence()} thr=${thr.toFixed(3)}V ch_thr=${chThr}`;
+}
+
+async function applyTriggerModeSelected() {
+  if (uiBusy) return;
+  uiBusy = true;
+  try {
+    await refresh();
+    if (transitionInProgress !== 0 || runState !== 1) { alert("Stop run and wait for transition idle."); return; }
+    if (!selectedChannels.length) { alert("Select at least one channel."); return; }
+    const mode = Number(document.getElementById("trigger_mode").value || 0);
+    await mjsonrpc_db_paste([
+      "/Equipment/WaveCatcher/Variables/enabled_channels_csv",
+      "/Equipment/WaveCatcher/Variables/enabled_channel",
+      "/Equipment/WaveCatcher/Variables/coincidence_channel",
+      "/Equipment/WaveCatcher/Variables/trigger_mode",
+      "/Equipment/WaveCatcher/Variables/ui_last_apply_status",
+      "/Equipment/WaveCatcher/Variables/ui_last_apply_error"
+    ], [
+      channelsCsv(selectedChannels),
+      selectedPrimary(),
+      selectedCoincidence(),
+      mode,
+      buildCombinedStatus(),
+      ""
+    ]);
+    formDirty = false;
+    await refresh(true);
+  } finally { uiBusy = false; }
+}
+
+async function applyThresholdSelected() {
+  if (uiBusy) return;
+  uiBusy = true;
+  try {
+    await refresh();
+    if (transitionInProgress !== 0 || runState !== 1) { alert("Stop run and wait for transition idle."); return; }
+    if (!selectedChannels.length) { alert("Select at least one channel."); return; }
+    const thr = Number(document.getElementById("trigger_threshold_v").value || 0);
+    const mapCsv = selectedChannels.map(ch => `${ch}:${thr.toFixed(3)}`).join(",");
+    document.getElementById("channel_thresholds_csv").value = mapCsv;
+    await mjsonrpc_db_paste([
+      "/Equipment/WaveCatcher/Variables/enabled_channels_csv",
+      "/Equipment/WaveCatcher/Variables/enabled_channel",
+      "/Equipment/WaveCatcher/Variables/coincidence_channel",
+      "/Equipment/WaveCatcher/Variables/trigger_threshold_v",
+      "/Equipment/WaveCatcher/Variables/selected_threshold_v",
+      "/Equipment/WaveCatcher/Variables/apply_threshold_to_selected",
+      "/Equipment/WaveCatcher/Variables/channel_thresholds_csv",
+      "/Equipment/WaveCatcher/Variables/coincidence_threshold_v",
+      "/Equipment/WaveCatcher/Variables/ui_last_apply_status",
+      "/Equipment/WaveCatcher/Variables/ui_last_apply_error"
+    ], [
+      channelsCsv(selectedChannels),
+      selectedPrimary(),
+      selectedCoincidence(),
+      thr,
+      thr,
+      true,
+      mapCsv,
+      thr,
+      buildCombinedStatus(),
+      ""
+    ]);
+    formDirty = false;
+    await refresh(true);
+  } finally { uiBusy = false; }
+}
+
+async function applyTriggerEdgeSelected() {
+  if (uiBusy) return;
+  uiBusy = true;
+  try {
+    await refresh();
+    if (transitionInProgress !== 0 || runState !== 1) { alert("Stop run and wait for transition idle."); return; }
+    if (!selectedChannels.length) { alert("Select at least one channel."); return; }
+    const edge = Number(document.getElementById("trigger_edge").value || 0);
+    await mjsonrpc_db_paste([
+      "/Equipment/WaveCatcher/Variables/enabled_channels_csv",
+      "/Equipment/WaveCatcher/Variables/enabled_channel",
+      "/Equipment/WaveCatcher/Variables/coincidence_channel",
+      "/Equipment/WaveCatcher/Variables/trigger_edge",
+      "/Equipment/WaveCatcher/Variables/ui_last_apply_status",
+      "/Equipment/WaveCatcher/Variables/ui_last_apply_error"
+    ], [
+      channelsCsv(selectedChannels),
+      selectedPrimary(),
+      selectedCoincidence(),
+      edge,
+      buildCombinedStatus(),
+      ""
+    ]);
+    formDirty = false;
+    await refresh(true);
+  } finally { uiBusy = false; }
+}
+
+async function resetSettings() {
+  if (uiBusy) return;
+  uiBusy = true;
+  try {
+    if (transitionInProgress !== 0 || runState !== 1) { alert("Stop run and wait for transition idle."); return; }
+    selectedChannels = [];
+    renderChannelButtons();
+    await mjsonrpc_db_paste([
+      "/Equipment/WaveCatcher/Variables/trigger_mode",
+      "/Equipment/WaveCatcher/Variables/trigger_edge",
+      "/Equipment/WaveCatcher/Variables/enabled_channel",
+      "/Equipment/WaveCatcher/Variables/enabled_channels_csv",
+      "/Equipment/WaveCatcher/Variables/trigger_threshold_v",
+      "/Equipment/WaveCatcher/Variables/selected_threshold_v",
+      "/Equipment/WaveCatcher/Variables/apply_threshold_to_selected",
+      "/Equipment/WaveCatcher/Variables/channel_thresholds_csv",
+      "/Equipment/WaveCatcher/Variables/coincidence_channel",
+      "/Equipment/WaveCatcher/Variables/coincidence_threshold_v",
+      "/Equipment/WaveCatcher/Variables/sw_trigger_hz",
+      "/Equipment/WaveCatcher/Variables/auto_stop_mode",
+      "/Equipment/WaveCatcher/Variables/run_duration_s",
+      "/Equipment/WaveCatcher/Variables/target_event_count",
+      "/Equipment/WaveCatcher/Variables/ui_last_apply_status",
+      "/Equipment/WaveCatcher/Variables/ui_last_apply_error"
+    ], [
+      0, 0, 0, "", 0.03, 0.03, false, "", 1, 0.03, 0, 0, 0, 0, "reset", ""
+    ]);
+    formDirty = false;
+    await refresh(true);
+  } finally { uiBusy = false; }
 }
 
 async function applyScanSettings() {
@@ -308,14 +525,16 @@ async function applyScanSettings() {
       "/Scan/Threshold/StopV",
       "/Scan/Threshold/StepV",
       "/Scan/Threshold/DwellS",
-      "/Scan/Threshold/ChannelsCsv"
+      "/Scan/Threshold/ChannelsCsv",
+      "/Scan/Threshold/TriggerMode"
     ];
     const vals = [
       Number(document.getElementById("scan_start_v").value || 0),
       Number(document.getElementById("scan_stop_v").value || 0),
       Number(document.getElementById("scan_step_v").value || 0.005),
       Number(document.getElementById("scan_dwell_s").value || 2),
-      document.getElementById("scan_channels_csv").value.trim()
+      document.getElementById("scan_channels_csv").value.trim(),
+      Number(document.getElementById("scan_trigger_mode").value || 0)
     ];
     await mjsonrpc_db_paste(paths, vals);
     scanDirty = false;
@@ -341,6 +560,7 @@ async function requestThresholdScan() {
       "/Scan/Threshold/StepV",
       "/Scan/Threshold/DwellS",
       "/Scan/Threshold/ChannelsCsv",
+      "/Scan/Threshold/TriggerMode",
       "/Scan/Threshold/LastError",
       "/Scan/Threshold/State",
       "/Scan/Threshold/ResultPlotPath",
@@ -352,6 +572,7 @@ async function requestThresholdScan() {
       Number(document.getElementById("scan_step_v").value || 0.005),
       Number(document.getElementById("scan_dwell_s").value || 2),
       document.getElementById("scan_channels_csv").value.trim(),
+      Number(document.getElementById("scan_trigger_mode").value || 0),
       "",
       "requested",
       "",
