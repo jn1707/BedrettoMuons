@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html class="mcss" lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="midas.css">
+  <script src="midas.js"></script>
+  <script src="mhttpd.js"></script>
+  <title>WaveCatcher Last Run Summary</title>
+  <style>
+    .row { display:flex; gap:10px; align-items:center; margin:6px 0; flex-wrap:wrap; }
+    .lbl { min-width:220px; font-weight:600; }
+    .mono { font-family:monospace; }
+    .nav a { margin-right:12px; }
+  </style>
+</head>
+<body class="mcss" onload="initPage()">
+<div id="mheader"></div>
+<div id="msidenav"></div>
+<div id="mmain">
+  <table class="mtable">
+    <tr><th class="mtableheader">WaveCatcher Pages</th></tr>
+    <tr><td class="nav">
+      <a href="/custom/wc_control.html">Run Controls</a>
+      <a href="/custom/wc_monitoring.html">Live Monitoring</a>
+      <a href="/custom/wc_summary.html">Last Run Summary</a>
+    </td></tr>
+  </table>
+
+  <table class="mtable">
+    <tr><th class="mtableheader">Last Run Summary</th></tr>
+    <tr><td>
+      <div class="row"><span class="lbl">Last run number</span><span id="run_number" class="mono"></span></div>
+      <div class="row"><span class="lbl">State</span><span id="run_state" class="mono"></span></div>
+      <div class="row"><span class="lbl">Events sent</span><span id="events_sent" class="mono"></span></div>
+      <div class="row"><span class="lbl">Elapsed [s]</span><span id="elapsed_s" class="mono"></span></div>
+      <div class="row"><span class="lbl">Event rate [Hz]</span><span id="event_rate" class="mono"></span></div>
+      <div class="row"><span class="lbl">Enabled channels</span><span id="channels" class="mono"></span></div>
+      <div class="row"><span class="lbl">Threshold [V]</span><span id="threshold" class="mono"></span></div>
+      <div class="row"><span class="lbl">Mode</span><span id="mode" class="mono"></span></div>
+      <div class="row"><span class="lbl">Edge</span><span id="edge" class="mono"></span></div>
+      <div class="row"><span class="lbl">Auto-stop mode</span><span id="auto_stop" class="mono"></span></div>
+      <div class="row"><span class="lbl">Last run file</span><span id="run_file" class="mono"></span></div>
+    </td></tr>
+  </table>
+</div>
+
+<script>
+const PATHS = [
+  "/Equipment/WaveCatcher/RunSummary/run_number",
+  "/Equipment/WaveCatcher/RunSummary/run_state",
+  "/Equipment/WaveCatcher/RunSummary/events_sent",
+  "/Equipment/WaveCatcher/RunSummary/elapsed_s",
+  "/Equipment/WaveCatcher/RunSummary/event_rate_hz",
+  "/Equipment/WaveCatcher/RunSummary/enabled_channels_csv",
+  "/Equipment/WaveCatcher/RunSummary/trigger_threshold_v",
+  "/Equipment/WaveCatcher/RunSummary/trigger_mode",
+  "/Equipment/WaveCatcher/RunSummary/trigger_edge",
+  "/Equipment/WaveCatcher/RunSummary/auto_stop_mode",
+  "/Equipment/WaveCatcher/RunSummary/run_duration_s",
+  "/Equipment/WaveCatcher/RunSummary/target_event_count",
+  "/Equipment/WaveCatcher/RunSummary/last_run_file"
+];
+const IDX = Object.fromEntries(PATHS.map((p,i)=>[p,i]));
+function v(d,p){return d[IDX[p]];}
+function setText(id, x) { document.getElementById(id).textContent = (x == null) ? "" : String(x); }
+function modeName(m){ m=Number(m); return m===2?"coincidence":(m===1?"software":"normal"); }
+function edgeName(e){ return Number(e)===1?"negative":"positive"; }
+function autoStopName(m,d,t){ m=Number(m); if(m===1) return `duration (${d}s)`; if(m===2) return `event_count (${t})`; return "none"; }
+async function refresh() {
+  const rpc = await mjsonrpc_db_get_values(PATHS);
+  const d = rpc.result.data;
+  setText("run_number", v(d, PATHS[0]));
+  setText("run_state", v(d, PATHS[1]));
+  setText("events_sent", v(d, PATHS[2]));
+  setText("elapsed_s", Number(v(d, PATHS[3]) || 0).toFixed(3));
+  setText("event_rate", Number(v(d, PATHS[4]) || 0).toFixed(3));
+  setText("channels", v(d, PATHS[5]) || "");
+  setText("threshold", v(d, PATHS[6]));
+  setText("mode", modeName(v(d, PATHS[7])));
+  setText("edge", edgeName(v(d, PATHS[8])));
+  setText("auto_stop", autoStopName(v(d, PATHS[9]), v(d, PATHS[10]), v(d, PATHS[11])));
+  setText("run_file", v(d, PATHS[12]) || "");
+}
+function initPage() {
+  mhttpd_init("WaveCatcher Last Run Summary");
+  refresh().catch(mjsonrpc_error_alert);
+  setInterval(()=>refresh().catch(()=>{}), 3000);
+}
+</script>
+</body>
+</html>
