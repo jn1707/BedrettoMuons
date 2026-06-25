@@ -59,6 +59,20 @@
   </table>
 
   <table class="mtable">
+    <tr><th class="mtableheader">Physics Histograms (reset each run)</th></tr>
+    <tr><td>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;">
+        <canvas id="hist_pos_bar0" width="420" height="240"></canvas>
+        <canvas id="hist_pos_bar1" width="420" height="240"></canvas>
+      </div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;">
+        <canvas id="hist_angle" width="420" height="240"></canvas>
+      </div>
+      <div class="hint" style="margin-top:6px;">Hit position = TDC_left − TDC_right per bar. Angle = atan2((pos<sub>1</sub>−pos<sub>0</sub>)×tdc_to_cm, bar_sep_cm). Configure bar channel pairs via ODB: /Equipment/WaveCatcher/Variables/hist_bar0_ch_left/right and hist_bar1_ch_left/right.</div>
+    </td></tr>
+  </table>
+
+  <table class="mtable">
     <tr><th class="mtableheader">Live Waveform Preview</th></tr>
     <tr><td>
       <div class="row"><span class="lbl">Overlay channels</span><span id="preview_channels_csv" class="mono"></span></div>
@@ -86,7 +100,10 @@ const PATHS = [
   "/Equipment/WaveCatcher/Live/preview_waveforms_encoded",
   "/Equipment/WaveCatcher/Live/preview_waveform_csv",
   "/Equipment/WaveCatcher/Live/preview_samples",
-  "/Equipment/WaveCatcher/Live/preview_updated_ms"
+  "/Equipment/WaveCatcher/Live/preview_updated_ms",
+  "/Analysis/Histograms/HitPosBar0",
+  "/Analysis/Histograms/HitPosBar1",
+  "/Analysis/Histograms/HitAngle"
 ];
 const IDX = Object.fromEntries(PATHS.map((p,i)=>[p,i]));
 const rateHistory = [];
@@ -150,6 +167,58 @@ function drawRatePlot() {
     if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
   }
   ctx.stroke();
+}
+
+function parseHistogram(encoded) {
+  if (!encoded) return null;
+  const parts = String(encoded).split(",").map(Number);
+  if (parts.length < 4 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1])) return null;
+  const min = parts[0], max = parts[1];
+  if (min >= max) return null;
+  const counts = parts.slice(2);
+  if (counts.every(v => v === 0)) return null;
+  return { min, max, counts };
+}
+
+function drawHistogram(canvasId, encoded, title, xlabel) {
+  const c = document.getElementById(canvasId);
+  const ctx = c.getContext("2d");
+  const w = c.width, h = c.height, L = 55, R = 20, T = 24, B = 38;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#444";
+  ctx.font = "bold 12px sans-serif";
+  ctx.fillText(title, L + 6, T - 6);
+  drawAxes(ctx, w, h, L, R, T, B, xlabel, "counts");
+  const hist = parseHistogram(encoded);
+  if (!hist) {
+    ctx.fillStyle = "#aaa"; ctx.font = "12px sans-serif";
+    ctx.fillText("no data", L + (w - L - R) / 2 - 20, T + (h - T - B) / 2);
+    return;
+  }
+  const nbins = hist.counts.length;
+  const ymax = Math.max(1, ...hist.counts);
+  const bw = (w - L - R) / nbins;
+  ctx.fillStyle = "#666"; ctx.font = "11px sans-serif";
+  for (let i = 0; i <= 4; i++) {
+    const yv = ymax * i / 4;
+    const y = T + (ymax - yv) * (h - T - B) / ymax;
+    ctx.fillText(Math.round(yv), 4, y + 4);
+    ctx.strokeStyle = "#eee"; ctx.beginPath();
+    ctx.moveTo(L, y); ctx.lineTo(w - R, y); ctx.stroke();
+  }
+  for (let i = 0; i <= 5; i++) {
+    const xv = hist.min + (hist.max - hist.min) * i / 5;
+    const x = L + (w - L - R) * i / 5;
+    ctx.fillStyle = "#666";
+    ctx.fillText(xv.toFixed(0), x - 10, h - B + 16);
+  }
+  ctx.fillStyle = "#1976d2";
+  for (let i = 0; i < nbins; i++) {
+    if (!hist.counts[i]) continue;
+    const x = L + i * bw;
+    const bh = hist.counts[i] * (h - T - B) / ymax;
+    ctx.fillRect(x, h - B - bh, Math.max(1, bw - 1), bh);
+  }
 }
 
 function parseOverlay(encoded, fallbackCsv) {
@@ -255,6 +324,9 @@ async function refresh() {
     v(d, "/Equipment/WaveCatcher/Live/preview_waveforms_encoded") || "",
     v(d, "/Equipment/WaveCatcher/Live/preview_waveform_csv") || ""
   );
+  drawHistogram("hist_pos_bar0", v(d, "/Analysis/Histograms/HitPosBar0"), "Hit position Bar 0", "Δt (TDC counts)");
+  drawHistogram("hist_pos_bar1", v(d, "/Analysis/Histograms/HitPosBar1"), "Hit position Bar 1", "Δt (TDC counts)");
+  drawHistogram("hist_angle",    v(d, "/Analysis/Histograms/HitAngle"),   "Muon arrival angle",   "angle [°]");
 }
 
 function initPage() {

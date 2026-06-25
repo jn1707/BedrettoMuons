@@ -90,6 +90,25 @@ static std::array<float, 64> g_channel_last_peak {};
 static std::array<float, 64> g_channel_last_charge {};
 static std::array<float, 64> g_channel_last_baseline {};
 
+/* Physics histograms for outreach demo.
+   Bar 0: channels hist_bar0_ch_left / hist_bar0_ch_right (configurable via ODB).
+   Bar 1: channels hist_bar1_ch_left / hist_bar1_ch_right.
+   Hit position = TimeCount[left] - TimeCount[right] (TDC counts, symmetric around 0).
+   Angle        = atan2((pos1 - pos0) * tdc_to_cm, bar_sep_cm) in degrees.
+   All three histograms are reset at BOR and published to ODB at 1 Hz. */
+static const int HIST_NBINS = 100;
+static int   g_hist_bar0_ch_left  = 0;
+static int   g_hist_bar0_ch_right = 1;
+static int   g_hist_bar1_ch_left  = 2;
+static int   g_hist_bar1_ch_right = 3;
+static float g_hist_pos_min       = -200.0f; /* TDC counts */
+static float g_hist_pos_max       =  200.0f;
+static float g_hist_bar_sep_cm    =   50.0f; /* vertical separation between the two bars */
+static float g_hist_tdc_to_cm     =    0.5f; /* cm per TDC count – tune after first run */
+static std::array<unsigned long long, HIST_NBINS> g_hist_pos_bar0 {};
+static std::array<unsigned long long, HIST_NBINS> g_hist_pos_bar1 {};
+static std::array<unsigned long long, HIST_NBINS> g_hist_angle {};
+
 struct TransitionGuard {
    bool acquired = false;
    TransitionGuard(char *error, const char *where)
@@ -111,10 +130,23 @@ struct TransitionGuard {
    }
 };
 
+static void hist_fill(std::array<unsigned long long, HIST_NBINS>& h, float val, float vmin, float vmax)
+{
+   if (!std::isfinite(val) || val < vmin || val >= vmax) return;
+   int bin = (int)((val - vmin) / (vmax - vmin) * HIST_NBINS);
+   if (bin >= 0 && bin < HIST_NBINS) h[bin]++;
+}
+
+static std::string hist_to_odb_string(const std::array<unsigned long long, HIST_NBINS>& h, float vmin, float vmax)
+{
+   std::ostringstream oss;
+   oss << vmin << "," << vmax;
+   for (int i = 0; i < HIST_NBINS; i++) oss << "," << h[i];
+   return oss.str();
+}
+
 static void wc_set_device_open_state_odb()
 {
-   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_open_state",
-                &g_device_open_state, sizeof(g_device_open_state), 1, TID_INT);
    const char *state_str = "idle";
    if (g_device_open_state == 1) state_str = "in_progress";
    else if (g_device_open_state == 2) state_str = "ready";
@@ -256,10 +288,24 @@ static void ensure_odb_schema_defaults()
       "auto_stop_mode: 0=none 1=duration(run_duration_s) 2=event_count(target_event_count)";
     db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/help",
                  help, (INT)strlen(help) + 1, 1, TID_STRING);
-    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_open_state",
-                 &g_device_open_state, sizeof(g_device_open_state), 1, TID_INT);
-    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_open_state_str",
-                 "idle", 5, 1, TID_STRING);
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_open_state_str",
+                "idle", 5, 1, TID_STRING);
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_bar0_ch_left",
+                &g_hist_bar0_ch_left,  sizeof(g_hist_bar0_ch_left),  1, TID_INT);
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_bar0_ch_right",
+                &g_hist_bar0_ch_right, sizeof(g_hist_bar0_ch_right), 1, TID_INT);
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_bar1_ch_left",
+                &g_hist_bar1_ch_left,  sizeof(g_hist_bar1_ch_left),  1, TID_INT);
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_bar1_ch_right",
+                &g_hist_bar1_ch_right, sizeof(g_hist_bar1_ch_right), 1, TID_INT);
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_pos_min",
+                &g_hist_pos_min,      sizeof(g_hist_pos_min),      1, TID_FLOAT);
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_pos_max",
+                &g_hist_pos_max,      sizeof(g_hist_pos_max),      1, TID_FLOAT);
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_bar_sep_cm",
+                &g_hist_bar_sep_cm,   sizeof(g_hist_bar_sep_cm),   1, TID_FLOAT);
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_tdc_to_cm",
+                &g_hist_tdc_to_cm,    sizeof(g_hist_tdc_to_cm),    1, TID_FLOAT);
 
    const char *none = "n/a";
    INT i0 = 0;
@@ -285,7 +331,6 @@ static void ensure_odb_schema_defaults()
    wc_set_run_summary_value("target_event_count", &i0, sizeof(i0), TID_INT);
    wc_set_run_summary_value("last_run_file", none, 4, TID_STRING);
 
-   wc_set_live_value("preview_channel", &i0, sizeof(i0), TID_INT);
    wc_set_live_value("preview_waveform_csv", "", 1, TID_STRING);
    wc_set_live_value("preview_channels_csv", "", 1, TID_STRING);
    wc_set_live_value("preview_waveforms_encoded", "", 1, TID_STRING);
@@ -309,7 +354,14 @@ static void ensure_odb_schema_defaults()
    wc_set_analysis_global_value("WarningActive", &i0, sizeof(i0), TID_INT);
    wc_set_analysis_global_value("WarningText", warn_txt, 1, TID_STRING);
    wc_set_analysis_live_value("ChannelsSummaryCsv", channels_summary, 1, TID_STRING);
-   wc_set_analysis_live_value("PreviewSamples", &i0, sizeof(i0), TID_INT);
+   wc_ensure_dir("/Analysis/Histograms");
+   {
+      std::string hs_init = hist_to_odb_string(g_hist_pos_bar0, g_hist_pos_min, g_hist_pos_max);
+      std::string hsa_init = hist_to_odb_string(g_hist_angle, -90.0f, 90.0f);
+      db_set_value(hDB, 0, "/Analysis/Histograms/HitPosBar0", hs_init.c_str(), (INT)hs_init.size()+1, 1, TID_STRING);
+      db_set_value(hDB, 0, "/Analysis/Histograms/HitPosBar1", hs_init.c_str(), (INT)hs_init.size()+1, 1, TID_STRING);
+      db_set_value(hDB, 0, "/Analysis/Histograms/HitAngle",   hsa_init.c_str(), (INT)hsa_init.size()+1, 1, TID_STRING);
+   }
 
    db_set_value(hDB, 0, "/UI/Dashboard/SelectedChannelsCsv", "", 1, 1, TID_STRING);
    db_set_value(hDB, 0, "/UI/Dashboard/SelectedPlotMode", "rate", 5, 1, TID_STRING);
@@ -586,6 +638,31 @@ static void load_settings_from_odb()
    size = sizeof(help_text);
    db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/help",
                 help_text, &size, TID_STRING, TRUE);
+
+   size = sizeof(g_hist_bar0_ch_left);
+   db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_bar0_ch_left",
+                &g_hist_bar0_ch_left,  &size, TID_INT, TRUE);
+   size = sizeof(g_hist_bar0_ch_right);
+   db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_bar0_ch_right",
+                &g_hist_bar0_ch_right, &size, TID_INT, TRUE);
+   size = sizeof(g_hist_bar1_ch_left);
+   db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_bar1_ch_left",
+                &g_hist_bar1_ch_left,  &size, TID_INT, TRUE);
+   size = sizeof(g_hist_bar1_ch_right);
+   db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_bar1_ch_right",
+                &g_hist_bar1_ch_right, &size, TID_INT, TRUE);
+   size = sizeof(g_hist_pos_min);
+   db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_pos_min",
+                &g_hist_pos_min,      &size, TID_FLOAT, TRUE);
+   size = sizeof(g_hist_pos_max);
+   db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_pos_max",
+                &g_hist_pos_max,      &size, TID_FLOAT, TRUE);
+   size = sizeof(g_hist_bar_sep_cm);
+   db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_bar_sep_cm",
+                &g_hist_bar_sep_cm,   &size, TID_FLOAT, TRUE);
+   size = sizeof(g_hist_tdc_to_cm);
+   db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_tdc_to_cm",
+                &g_hist_tdc_to_cm,    &size, TID_FLOAT, TRUE);
 }
 
 static INT wc_open_device_with_retries()
@@ -879,6 +956,9 @@ INT begin_of_run(INT run_number, char *error)
    g_channel_last_peak.fill(0.0f);
    g_channel_last_charge.fill(0.0f);
    g_channel_last_baseline.fill(0.0f);
+   g_hist_pos_bar0.fill(0);
+   g_hist_pos_bar1.fill(0);
+   g_hist_angle.fill(0);
    g_last_analysis_update_ms = 0;
    memset(&g_evt, 0, sizeof(g_evt));
 
@@ -1088,6 +1168,14 @@ INT frontend_loop(void)
          }
          std::string summary_csv = summary.str();
          wc_set_analysis_live_value("ChannelsSummaryCsv", summary_csv.c_str(), (INT)summary_csv.size() + 1, TID_STRING);
+
+         wc_ensure_dir("/Analysis/Histograms");
+         std::string hs0 = hist_to_odb_string(g_hist_pos_bar0, g_hist_pos_min, g_hist_pos_max);
+         std::string hs1 = hist_to_odb_string(g_hist_pos_bar1, g_hist_pos_min, g_hist_pos_max);
+         std::string hsa = hist_to_odb_string(g_hist_angle, -90.0f, 90.0f);
+         db_set_value(hDB, 0, "/Analysis/Histograms/HitPosBar0", hs0.c_str(), (INT)hs0.size()+1, 1, TID_STRING);
+         db_set_value(hDB, 0, "/Analysis/Histograms/HitPosBar1", hs1.c_str(), (INT)hs1.size()+1, 1, TID_STRING);
+         db_set_value(hDB, 0, "/Analysis/Histograms/HitAngle",   hsa.c_str(), (INT)hsa.size()+1, 1, TID_STRING);
          g_last_analysis_update_ms = now_ms;
       }
    }
@@ -1238,6 +1326,10 @@ INT read_wavecatcher_event(char *pevent, INT off)
    }
    wc_publish_available_channels(publish_channels);
 
+   /* Per-event TimeCount tracking for hit-position histograms. */
+   std::array<float, 64> event_time_count {};
+   std::array<bool,  64> event_decoded   {};
+
    for (int ch : channels_to_read) {
       WAVECAT64CH_ChannelDataStruct cd {};
       {
@@ -1256,9 +1348,11 @@ INT read_wavecatcher_event(char *pevent, INT off)
       feats.push_back(cd.Charge);
       if (ch >= 0 && ch < 64) {
          g_channel_decode_hits[ch]++;
-         g_channel_last_peak[ch] = cd.Peak;
-         g_channel_last_charge[ch] = cd.Charge;
+         g_channel_last_peak[ch]     = cd.Peak;
+         g_channel_last_charge[ch]   = cd.Charge;
          g_channel_last_baseline[ch] = cd.Baseline;
+         event_time_count[ch] = (float)cd.TimeCount;
+         event_decoded[ch]    = true;
       }
 
       if (cd.WaveformData == NULL) {
@@ -1286,6 +1380,28 @@ INT read_wavecatcher_event(char *pevent, INT off)
           }
           g_wave_channels_written++;
 
+      }
+   }
+
+   /* Hit position and arrival angle.
+      pos = TimeCount[left] - TimeCount[right] for each bar (symmetric around 0 at bar centre).
+      angle = atan2((pos1 - pos0) * tdc_to_cm, bar_sep_cm) in degrees, zero = vertical. */
+   {
+      auto ch_ok = [&](int ch) -> bool {
+         return ch >= 0 && ch < 64 && event_decoded[ch];
+      };
+      if (ch_ok(g_hist_bar0_ch_left) && ch_ok(g_hist_bar0_ch_right)) {
+         float pos0 = event_time_count[g_hist_bar0_ch_left] - event_time_count[g_hist_bar0_ch_right];
+         hist_fill(g_hist_pos_bar0, pos0, g_hist_pos_min, g_hist_pos_max);
+         if (ch_ok(g_hist_bar1_ch_left) && ch_ok(g_hist_bar1_ch_right)) {
+            float pos1 = event_time_count[g_hist_bar1_ch_left] - event_time_count[g_hist_bar1_ch_right];
+            hist_fill(g_hist_pos_bar1, pos1, g_hist_pos_min, g_hist_pos_max);
+            float dpos_cm = (pos1 - pos0) * g_hist_tdc_to_cm;
+            float angle_deg = (g_hist_bar_sep_cm > 0.0f)
+               ? (atan2f(dpos_cm, g_hist_bar_sep_cm) * 180.0f / (float)M_PI)
+               : 0.0f;
+            hist_fill(g_hist_angle, angle_deg, -90.0f, 90.0f);
+         }
       }
    }
 
@@ -1355,13 +1471,11 @@ INT read_wavecatcher_event(char *pevent, INT off)
       int preview_ms = (int)now_ms;
       std::string overlay_channels_csv = channels_csv_oss.str();
       std::string overlay_encoded = encoded_oss.str();
-      wc_set_live_value("preview_channel", &first_channel, sizeof(first_channel), TID_INT);
       wc_set_live_value("preview_waveform_csv", first_wave_csv.c_str(), (INT)first_wave_csv.size() + 1, TID_STRING);
       wc_set_live_value("preview_channels_csv", overlay_channels_csv.c_str(), (INT)overlay_channels_csv.size() + 1, TID_STRING);
       wc_set_live_value("preview_waveforms_encoded", overlay_encoded.c_str(), (INT)overlay_encoded.size() + 1, TID_STRING);
       wc_set_live_value("preview_samples", &overlay_samples, sizeof(overlay_samples), TID_INT);
       wc_set_live_value("preview_updated_ms", &preview_ms, sizeof(preview_ms), TID_INT);
-      wc_set_analysis_live_value("PreviewSamples", &overlay_samples, sizeof(overlay_samples), TID_INT);
       g_last_live_update_ms = now_ms;
    }
 
