@@ -49,7 +49,8 @@ static float g_trigger_threshold_v = 0.030f;
 static WAVECAT64CH_TriggerEdgeType g_trigger_edge = WAVECAT64CH_POS_EDGE;
 static int g_enabled_channel = 0;
 static int g_sw_trigger_hz = 0;
-static int g_trigger_mode_odb = 0; /* 0=normal, 1=soft, 2=coincidence */
+static int g_trigger_mode_odb = 0; /* 0=normal, 1=soft, 2=coincidence (auto-majority if N>2) */
+static int g_applied_trigger_mode = 0; /* last hardware mode actually applied (0..3) */
 static int g_coincidence_channel = 1;
 static float g_coincidence_threshold_v = 0.050f;
 static int g_sampling_frequency_mhz = 3200;
@@ -144,6 +145,9 @@ static std::string hist_to_odb_string(const std::array<unsigned long long, HIST_
    for (int i = 0; i < HIST_NBINS; i++) oss << "," << h[i];
    return oss.str();
 }
+
+static const char *wc_trigger_mode_name(int mode);
+static void wc_publish_applied_trigger_mode(int mode);
 
 static void wc_set_device_open_state_odb()
 {
@@ -241,6 +245,11 @@ static void wc_update_run_summary(INT run_number)
    wc_set_run_summary_value("elapsed_s", &elapsed_s, sizeof(elapsed_s), TID_DOUBLE);
    wc_set_run_summary_value("event_rate_hz", &rate_hz, sizeof(rate_hz), TID_DOUBLE);
    wc_set_run_summary_value("trigger_mode", &g_trigger_mode_odb, sizeof(g_trigger_mode_odb), TID_INT);
+   {
+      const char *applied_name = wc_trigger_mode_name(g_applied_trigger_mode);
+      wc_set_run_summary_value("applied_trigger_mode", &g_applied_trigger_mode, sizeof(g_applied_trigger_mode), TID_INT);
+      wc_set_run_summary_value("applied_trigger_mode_str", applied_name, (INT)strlen(applied_name) + 1, TID_STRING);
+   }
    wc_set_run_summary_value("trigger_edge", &trigger_edge, sizeof(trigger_edge), TID_INT);
    wc_set_run_summary_value("enabled_channel", &g_enabled_channel, sizeof(g_enabled_channel), TID_INT);
    wc_set_run_summary_value("enabled_channels_csv", g_enabled_channels_csv.c_str(),
@@ -290,6 +299,14 @@ static void ensure_odb_schema_defaults()
                  help, (INT)strlen(help) + 1, 1, TID_STRING);
    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_open_state_str",
                 "idle", 5, 1, TID_STRING);
+   {
+      INT applied0 = 0;
+      const char *applied_str = "normal";
+      db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/applied_trigger_mode",
+                   &applied0, sizeof(applied0), 1, TID_INT);
+      db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/applied_trigger_mode_str",
+                   applied_str, (INT)strlen(applied_str) + 1, 1, TID_STRING);
+   }
    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_bar0_ch_left",
                 &g_hist_bar0_ch_left,  sizeof(g_hist_bar0_ch_left),  1, TID_INT);
    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_bar0_ch_right",
@@ -485,11 +502,29 @@ static void wc_publish_available_channels(int n_channels)
    wc_set_live_value("available_channels_csv", available.c_str(), (INT)available.size() + 1, TID_STRING);
 }
 
+static const char *wc_trigger_mode_name(int mode)
+{
+   switch (mode) {
+      case 1: return "software";
+      case 2: return "coincidence";
+      case 3: return "majority";
+      default: return "normal";
+   }
+}
+
+static void wc_publish_applied_trigger_mode(int mode)
+{
+   g_applied_trigger_mode = mode;
+   const char *name = wc_trigger_mode_name(mode);
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/applied_trigger_mode",
+                &g_applied_trigger_mode, sizeof(g_applied_trigger_mode), 1, TID_INT);
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/applied_trigger_mode_str",
+                name, (INT)strlen(name) + 1, 1, TID_STRING);
+}
+
 static std::string build_apply_summary()
 {
-   const char *mode = "normal";
-   if (g_trigger_mode_odb == 1) mode = "software";
-   else if (g_trigger_mode_odb == 2) mode = "coincidence";
+   const char *mode = wc_trigger_mode_name(g_applied_trigger_mode);
    const char *edge = (g_trigger_edge == WAVECAT64CH_POS_EDGE) ? "pos" : "neg";
    char buf[1024];
    snprintf(buf, sizeof(buf),
@@ -856,16 +891,23 @@ static INT wc_apply_run_configuration()
    }
 
    WAVECAT64CH_TriggerType trig_mode = WAVECAT64CH_TRIGGER_NORMAL;
+   int applied_mode = 0;
    if (use_coincidence) {
       trig_mode = use_majority ? WAVECAT64CH_TRIGGER_MAJORITY : WAVECAT64CH_TRIGGER_COINCIDENCE;
+      applied_mode = use_majority ? 3 : 2;
    } else if (g_sw_trigger_hz > 0 || g_trigger_mode_odb == 1) {
       trig_mode = WAVECAT64CH_TRIGGER_SOFT;
+      applied_mode = 1;
    }
    if (use_majority)
       cm_msg(MINFO, "WaveCatcher", "Applying N-channel coincidence using MAJORITY mode on selected channels");
    cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerMode mode=%d", (int)trig_mode);
    st = wc_check(WAVECAT64CH_SetTriggerMode(trig_mode), "SetTriggerMode");
-   if (st != SUCCESS) return st;
+   if (st != SUCCESS) {
+      wc_set_ui_status("error", "SetTriggerMode failed");
+      return st;
+   }
+   wc_publish_applied_trigger_mode(applied_mode);
 
    cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_PrepareEvent");
    st = wc_check(WAVECAT64CH_PrepareEvent(), "PrepareEvent");
@@ -875,9 +917,9 @@ static INT wc_apply_run_configuration()
    }
 
    cm_msg(MINFO, "WaveCatcher",
-          "BOR settings: ch=%d thr=%.3f edge=%d mode=%d odb_mode=%d sw_hz=%d",
+          "BOR settings: ch=%d thr=%.3f edge=%d mode=%d odb_mode=%d applied=%d sw_hz=%d",
           g_enabled_channel, g_trigger_threshold_v, (int)g_trigger_edge,
-          (int)trig_mode, g_trigger_mode_odb, g_sw_trigger_hz);
+          (int)trig_mode, g_trigger_mode_odb, applied_mode, g_sw_trigger_hz);
    cm_msg(MINFO, "WaveCatcher",
           "BOR extras: csv=%s sel_thr=%.3f apply_sel=%d coinc_ch=%d coinc_thr=%.3f dur_s=%d auto=%d target=%d",
           g_enabled_channels_csv.c_str(), g_selected_threshold_v, (int)g_apply_threshold_to_selected,

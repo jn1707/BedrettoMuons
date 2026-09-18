@@ -84,6 +84,7 @@
       <div class="row"><span class="lbl">Transition in progress</span><span id="transition_in_progress" class="mono"></span></div>
       <div class="row"><span class="lbl">Device open state</span><span id="device_open_state" class="mono"></span></div>
       <div class="row"><span class="lbl">Available channels</span><span id="available_channels_info" class="mono"></span></div>
+      <div class="row"><span class="lbl">Applied trigger</span><span id="applied_trigger" class="mono"></span></div>
       <div class="row"><span class="lbl">Help</span><span id="help_text" class="mono"></span></div>
     </td></tr>
   </table>
@@ -137,6 +138,7 @@ const PATHS = [
   "/Equipment/WaveCatcher/Variables/ui_last_apply_status",
   "/Equipment/WaveCatcher/Variables/ui_last_apply_error",
   "/Equipment/WaveCatcher/Variables/device_open_state_str",
+  "/Equipment/WaveCatcher/Variables/applied_trigger_mode_str",
   "/Equipment/WaveCatcher/Variables/help",
   "/Equipment/WaveCatcher/Live/available_channels_count",
   "/Equipment/WaveCatcher/Live/available_channels_csv",
@@ -259,6 +261,7 @@ function updateStatusFromData(data) {
   availableChannels = parsedAvail;
   setText("available_channels_info", `${availCount} channels: ${availCsv}`);
   renderChannelButtons();
+  setText("applied_trigger", val(data, "/Equipment/WaveCatcher/Variables/applied_trigger_mode_str") || "");
   setText("help_text", val(data, "/Equipment/WaveCatcher/Variables/help"));
   setText("scan_state", val(data, "/Scan/Threshold/State") || "");
   setText("scan_progress", val(data, "/Scan/Threshold/ProgressPct") || 0);
