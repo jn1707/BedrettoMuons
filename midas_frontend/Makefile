@@ -13,7 +13,7 @@ WC_LIB_FILE ?= $(WC_LIB_DIR)/libWaveCatcher64ch_v288.so
 MIDAS_FE_LIBS ?= -L$(MIDAS_LIB) -lmfe -lmidas -lpthread -lrt
 WC_LIBS ?= $(WC_LIB_FILE) -Wl,-rpath,$(WC_LIB_DIR)
 
-all: wc_test_harness wc_api_smoke_test wc_midas_frontend wc_device_server
+all: wc_test_harness wc_api_smoke_test wc_midas_frontend wc_device_server wc_majority_test
 
 wc_test_harness: wc_test_harness.c
 	$(CC) $(CFLAGS) -I$(WC_INC_DIR) -o $@ wc_test_harness.c $(WC_LIBS)
@@ -27,7 +27,10 @@ wc_midas_frontend: wc_midas_frontend.cxx
 wc_device_server: wc_device_server.c
 	$(CC) $(CFLAGS) -I$(WC_INC_DIR) -o $@ wc_device_server.c $(WC_LIBS)
 
+wc_majority_test: wc_majority_test.c
+	$(CC) $(CFLAGS) -I$(WC_INC_DIR) -o $@ wc_majority_test.c $(WC_LIBS)
+
 clean:
-	rm -f wc_test_harness wc_api_smoke_test wc_midas_frontend wc_device_server
+	rm -f wc_test_harness wc_api_smoke_test wc_midas_frontend wc_device_server wc_majority_test
 
 .PHONY: all clean

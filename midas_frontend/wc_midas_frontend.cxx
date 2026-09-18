@@ -741,6 +741,15 @@ static INT wc_apply_run_configuration()
       selected_channels.push_back(g_enabled_channel);
    std::sort(selected_channels.begin(), selected_channels.end());
    selected_channels.erase(std::unique(selected_channels.begin(), selected_channels.end()), selected_channels.end());
+   /* MAJORITY vs COINCIDENCE trigger distinction:
+      - COINCIDENCE (2-channel, use_majority=false): hardware fires when exactly the two channels
+        g_enabled_channel AND g_coincidence_channel both cross threshold simultaneously.
+        If >2 channels are selected but use_majority is forced false, all channels are
+        read out on every trigger, but the trigger condition itself only involves those two.
+        You get 4 waveforms per event, but you are NOT requiring all 4 channels to fire.
+      - MAJORITY (N-channel, use_majority=true): all selected channels participate as trigger
+        sources. The hardware fires only when a majority of them cross threshold simultaneously.
+        This is the correct mode for a true N-channel coincidence. */
    const bool use_majority = use_coincidence && selected_channels.size() > 2;
 
    wc_set_ui_status("applying", "");
@@ -764,6 +773,21 @@ static INT wc_apply_run_configuration()
       if (st != SUCCESS) {
          wc_set_ui_status("error", "SetChannelState(coincidence) failed");
          return st;
+      }
+   }
+
+   /* Explicitly disable trigger sources on all channels outside the selected set.
+      COINCIDENCE mode ignores extra active trigger sources, but MAJORITY counts every
+      channel with trigger source ON regardless of SetChannelState. Without this,
+      residual state from SetDefaultParameters or a prior run can cause MAJORITY to
+      free-run on noise from channels the user never selected. */
+   {
+      int n_front = wc_effective_hw_channels();
+      for (int ch = 0; ch < n_front; ch++) {
+         bool is_selected = std::find(selected_channels.begin(), selected_channels.end(), ch) != selected_channels.end();
+         if (!is_selected) {
+            WAVECAT64CH_SetTriggerSourceState(WAVECAT64CH_FRONT_CHANNEL, ch, WAVECAT64CH_STATE_OFF);
+         }
       }
    }
 
