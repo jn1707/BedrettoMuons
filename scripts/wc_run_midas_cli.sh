@@ -4,12 +4,13 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  wc_run_midas_cli.sh --duration SEC --triggermode normal|coincidence|software \
+  wc_run_midas_cli.sh --duration SEC --triggermode normal|coincidence|software|majority \
     --edge pos|neg --threshold VOLT --channels CH or CH0,CH1 [--sw-hz HZ] [--coinc-threshold VOLT] [--start-retries N]
 
 Examples:
   wc_run_midas_cli.sh --duration 10 --triggermode normal --edge pos --threshold 0.050 --channels 0
   wc_run_midas_cli.sh --duration 10 --triggermode coincidence --edge pos --threshold 0.050 --channels 0,1
+  wc_run_midas_cli.sh --duration 10 --triggermode majority --edge pos --threshold 0.050 --channels 0,1,2,3
   wc_run_midas_cli.sh --duration 8 --triggermode software --edge pos --threshold 0.020 --channels 0 --sw-hz 20
 EOF
 }
@@ -47,6 +48,7 @@ case "$TRIGGER_MODE" in
   normal) MODE_INT=0 ;;
   software) MODE_INT=1 ;;
   coincidence) MODE_INT=2 ;;
+  majority) MODE_INT=3 ;;
   *) echo "Invalid --triggermode: $TRIGGER_MODE" >&2; exit 2 ;;
 esac
 
@@ -60,6 +62,14 @@ IFS=',' read -r CH0 CH1 <<< "$CHANNELS"
 [[ -n "${CH0:-}" ]] || { echo "Invalid --channels: $CHANNELS" >&2; exit 2; }
 if [[ -z "${CH1:-}" ]]; then
   CH1="$CH0"
+fi
+
+if [[ "$MODE_INT" -eq 3 ]]; then
+  NCH="$(python3 -c "print(len([x for x in '''$CHANNELS'''.split(',') if x.strip()]))")"
+  if [[ "$NCH" -lt 3 ]]; then
+    echo "majority mode requires at least 3 channels in --channels" >&2
+    exit 2
+  fi
 fi
 
 if [[ -z "$COINC_THR" ]]; then

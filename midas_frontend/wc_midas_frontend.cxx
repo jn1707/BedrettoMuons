@@ -49,7 +49,7 @@ static float g_trigger_threshold_v = 0.030f;
 static WAVECAT64CH_TriggerEdgeType g_trigger_edge = WAVECAT64CH_POS_EDGE;
 static int g_enabled_channel = 0;
 static int g_sw_trigger_hz = 0;
-static int g_trigger_mode_odb = 0; /* 0=normal, 1=soft, 2=coincidence (auto-majority if N>2) */
+static int g_trigger_mode_odb = 0; /* 0=normal, 1=soft, 2=coincidence, 3=majority */
 static int g_applied_trigger_mode = 0; /* last hardware mode actually applied (0..3) */
 static int g_coincidence_channel = 1;
 static float g_coincidence_threshold_v = 0.050f;
@@ -288,12 +288,12 @@ static void ensure_odb_schema_defaults()
    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/ui_last_apply_error",
                 empty, 1, 1, TID_STRING);
    const char *help =
-      "trigger_mode: 0=normal 1=software 2=coincidence(2-channel) or majority(N-channel via selected channels) | "
+      "trigger_mode: 0=normal 1=software 2=coincidence(2-channel primary+partner) 3=majority(N>=3 selected channels) | "
       "trigger_edge: 0=pos 1=neg | "
       "trigger_threshold_v=primary threshold | "
       "selected_threshold_v=bulk threshold for enabled_channels_csv if apply_threshold_to_selected=true | "
       "channel_thresholds_csv=per-channel overrides, e.g. 0:0.02,1:0.03 | "
-      "coincidence_threshold_v=partner threshold | "
+      "coincidence_threshold_v=partner threshold (coincidence mode only) | "
       "Apply buttons are cumulative: use mode/edge/threshold buttons sequentially, then start run | "
       "auto_stop_mode: 0=none 1=duration(run_duration_s) 2=event_count(target_event_count)";
     db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/help",
@@ -587,12 +587,12 @@ static void load_settings_from_odb()
    char ui_status[256] = "idle";
    char ui_error[256] = "";
    char help_text[1024] =
-      "trigger_mode: 0=normal 1=software 2=coincidence(2-channel) or majority(N-channel via selected channels) | "
+      "trigger_mode: 0=normal 1=software 2=coincidence(2-channel primary+partner) 3=majority(N>=3 selected channels) | "
       "trigger_edge: 0=pos 1=neg | "
       "trigger_threshold_v=primary threshold | "
       "selected_threshold_v=bulk threshold for enabled_channels_csv if apply_threshold_to_selected=true | "
       "channel_thresholds_csv=per-channel overrides, e.g. 0:0.02,1:0.03 | "
-      "coincidence_threshold_v=partner threshold | "
+      "coincidence_threshold_v=partner threshold (coincidence mode only) | "
       "Apply buttons are cumulative: use mode/edge/threshold buttons sequentially, then start run | "
       "auto_stop_mode: 0=none 1=duration(run_duration_s) 2=event_count(target_event_count)";
 
@@ -777,7 +777,11 @@ static INT wc_apply_run_configuration()
    std::lock_guard<std::recursive_mutex> lock(g_wc_api_mutex);
    load_settings_from_odb();
    INT st = SUCCESS;
-   bool use_coincidence = (g_trigger_mode_odb == 2);
+   /* Trigger mode encoding:
+      0=normal, 1=software, 2=coincidence (primary+partner), 3=majority (N>=3 selected).
+      Coincidence never auto-promotes to majority. */
+   const bool use_coincidence = (g_trigger_mode_odb == 2);
+   const bool use_majority = (g_trigger_mode_odb == 3);
    std::vector<int> selected_channels = parse_channel_csv(g_enabled_channels_csv);
    std::map<int, float> per_channel_thresholds = parse_channel_threshold_csv(g_channel_thresholds_csv);
    if (selected_channels.empty())
@@ -786,16 +790,11 @@ static INT wc_apply_run_configuration()
       selected_channels.push_back(g_enabled_channel);
    std::sort(selected_channels.begin(), selected_channels.end());
    selected_channels.erase(std::unique(selected_channels.begin(), selected_channels.end()), selected_channels.end());
-   /* MAJORITY vs COINCIDENCE trigger distinction:
-      - COINCIDENCE (2-channel, use_majority=false): hardware fires when exactly the two channels
-        g_enabled_channel AND g_coincidence_channel both cross threshold simultaneously.
-        If >2 channels are selected but use_majority is forced false, all channels are
-        read out on every trigger, but the trigger condition itself only involves those two.
-        You get 4 waveforms per event, but you are NOT requiring all 4 channels to fire.
-      - MAJORITY (N-channel, use_majority=true): all selected channels participate as trigger
-        sources. The hardware fires only when a majority of them cross threshold simultaneously.
-        This is the correct mode for a true N-channel coincidence. */
-   const bool use_majority = use_coincidence && selected_channels.size() > 2;
+
+   if (use_majority && selected_channels.size() < 3) {
+      wc_set_ui_status("error", "Majority mode requires at least 3 selected channels");
+      return FE_ERR_HW;
+   }
 
    wc_set_ui_status("applying", "");
 
@@ -810,7 +809,7 @@ static INT wc_apply_run_configuration()
       }
    }
 
-   if (use_coincidence && !use_majority && g_coincidence_channel != g_enabled_channel) {
+   if (use_coincidence && g_coincidence_channel != g_enabled_channel) {
       cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetChannelState coincidence_ch=%d", g_coincidence_channel);
       st = wc_check(
          WAVECAT64CH_SetChannelState(WAVECAT64CH_FRONT_CHANNEL, g_coincidence_channel, WAVECAT64CH_STATE_ON),
@@ -821,16 +820,16 @@ static INT wc_apply_run_configuration()
       }
    }
 
-   /* Explicitly disable trigger sources on all channels outside the selected set.
-      COINCIDENCE mode ignores extra active trigger sources, but MAJORITY counts every
-      channel with trigger source ON regardless of SetChannelState. Without this,
-      residual state from SetDefaultParameters or a prior run can cause MAJORITY to
-      free-run on noise from channels the user never selected. */
+   /* Explicitly disable trigger sources on channels outside the active trigger set.
+      MAJORITY counts every channel with trigger source ON regardless of SetChannelState.
+      Without this, residual state from SetDefaultParameters or a prior run can cause
+      MAJORITY to free-run on noise from channels the user never selected. */
    {
       int n_front = wc_effective_hw_channels();
       for (int ch = 0; ch < n_front; ch++) {
          bool is_selected = std::find(selected_channels.begin(), selected_channels.end(), ch) != selected_channels.end();
-         if (!is_selected) {
+         bool is_coinc_partner = use_coincidence && (ch == g_coincidence_channel);
+         if (!is_selected && !is_coinc_partner) {
             WAVECAT64CH_SetTriggerSourceState(WAVECAT64CH_FRONT_CHANNEL, ch, WAVECAT64CH_STATE_OFF);
          }
       }
@@ -847,7 +846,7 @@ static INT wc_apply_run_configuration()
       }
    }
 
-   if (use_coincidence && !use_majority && g_coincidence_channel != g_enabled_channel) {
+   if (use_coincidence && g_coincidence_channel != g_enabled_channel) {
       cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerSourceState coincidence_ch=%d", g_coincidence_channel);
       st = wc_check(
          WAVECAT64CH_SetTriggerSourceState(WAVECAT64CH_FRONT_CHANNEL, g_coincidence_channel, WAVECAT64CH_STATE_ON),
@@ -883,7 +882,7 @@ static INT wc_apply_run_configuration()
       }
    }
 
-   if (use_coincidence && !use_majority && g_coincidence_channel != g_enabled_channel) {
+   if (use_coincidence && g_coincidence_channel != g_enabled_channel) {
       cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerEdge coincidence_ch=%d edge=%d", g_coincidence_channel, (int)g_trigger_edge);
       st = wc_check(
          WAVECAT64CH_SetTriggerEdge(WAVECAT64CH_FRONT_CHANNEL, g_coincidence_channel, g_trigger_edge),
@@ -902,15 +901,18 @@ static INT wc_apply_run_configuration()
 
    WAVECAT64CH_TriggerType trig_mode = WAVECAT64CH_TRIGGER_NORMAL;
    int applied_mode = 0;
-   if (use_coincidence) {
-      trig_mode = use_majority ? WAVECAT64CH_TRIGGER_MAJORITY : WAVECAT64CH_TRIGGER_COINCIDENCE;
-      applied_mode = use_majority ? 3 : 2;
+   if (use_majority) {
+      trig_mode = WAVECAT64CH_TRIGGER_MAJORITY;
+      applied_mode = 3;
+      cm_msg(MINFO, "WaveCatcher", "Applying MAJORITY trigger on %zu selected channels",
+             selected_channels.size());
+   } else if (use_coincidence) {
+      trig_mode = WAVECAT64CH_TRIGGER_COINCIDENCE;
+      applied_mode = 2;
    } else if (g_sw_trigger_hz > 0 || g_trigger_mode_odb == 1) {
       trig_mode = WAVECAT64CH_TRIGGER_SOFT;
       applied_mode = 1;
    }
-   if (use_majority)
-      cm_msg(MINFO, "WaveCatcher", "Applying N-channel coincidence using MAJORITY mode on selected channels");
    cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_SetTriggerMode mode=%d", (int)trig_mode);
    st = wc_check(WAVECAT64CH_SetTriggerMode(trig_mode), "SetTriggerMode");
    if (st != SUCCESS) {

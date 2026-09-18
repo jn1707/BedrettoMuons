@@ -63,7 +63,7 @@ const PATHS = [
 const IDX = Object.fromEntries(PATHS.map((p,i)=>[p,i]));
 function v(d,p){return d[IDX[p]];}
 function setText(id, x) { document.getElementById(id).textContent = (x == null) ? "" : String(x); }
-function modeName(m){ m=Number(m); return m===2?"coincidence":(m===1?"software":"normal"); }
+function modeName(m){ m=Number(m); return m===3?"majority":(m===2?"coincidence":(m===1?"software":"normal")); }
 function edgeName(e){ return Number(e)===1?"negative":"positive"; }
 function autoStopName(m,d,t){ m=Number(m); if(m===1) return `duration (${d}s)`; if(m===2) return `event_count (${t})`; return "none"; }
 async function refresh() {

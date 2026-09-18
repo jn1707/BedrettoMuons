@@ -183,8 +183,21 @@ print(vals[1] if len(vals) > 1 else (vals[0] if vals else "0"))
 PY
 )"
 
-  if [[ "${scan_mode}" != "2" ]]; then
+  if [[ "${scan_mode}" != "2" && "${scan_mode}" != "3" ]]; then
     scan_mode="0"
+  fi
+  if [[ "${scan_mode}" == "3" ]]; then
+    local n_ch
+    n_ch="$(python3 - "$channels_csv" <<'PY'
+import sys
+vals=[v.strip() for v in sys.argv[1].split(",") if v.strip()]
+print(len(vals))
+PY
+)"
+    if [[ "${n_ch}" -lt 3 ]]; then
+      odb_set_str "/Scan/Threshold/LastError" "majority scan requires at least 3 channels in ChannelsCsv"
+      return 1
+    fi
   fi
   odb_set "/Equipment/WaveCatcher/Variables/trigger_mode" "${scan_mode}"
   odb_set "/Equipment/WaveCatcher/Variables/enabled_channel" "${primary_ch}"

@@ -40,6 +40,7 @@
           <option value="0">Normal</option>
           <option value="1">Software</option>
           <option value="2">Coincidence</option>
+          <option value="3">Majority</option>
         </select>
       </div>
       <div class="row"><span class="lbl">Trigger edge</span>
@@ -54,6 +55,7 @@
       <div class="row"><span class="lbl">Trigger threshold [V]</span><input id="trigger_threshold_v" class="box" type="number" step="0.001"></div>
       <div class="row"><span class="lbl">Per-channel thresholds CSV</span><input id="channel_thresholds_csv" class="wide" type="text" placeholder="0:0.02,1:0.03,2:0.05"></div>
       <div class="row"><span class="lbl">Coincidence channel</span><input id="coincidence_channel" class="box" type="number" min="0" max="63"></div>
+      <div class="hint" id="coincidence_hint">Used only in Coincidence mode (partner channel).</div>
       <div class="row"><span class="lbl">Software trigger rate [Hz]</span><input id="sw_trigger_hz" class="box" type="number" min="0"></div>
       <div class="row"><span class="lbl">Auto stop mode</span>
         <select id="auto_stop_mode" class="box">
@@ -107,6 +109,7 @@
         <select id="scan_trigger_mode" class="box">
           <option value="0">Normal</option>
           <option value="2">Coincidence</option>
+          <option value="3">Majority</option>
         </select>
       </div>
       <div class="row">
@@ -234,6 +237,7 @@ function bindDirtyHandlers() {
     el.addEventListener("input", markDirty);
     el.addEventListener("change", markDirty);
   }
+  document.getElementById("trigger_mode").addEventListener("change", updateCoincidenceFieldState);
   for (const id of ["scan_start_v","scan_stop_v","scan_step_v","scan_dwell_s","scan_channels_csv","scan_trigger_mode"]) {
     const el = document.getElementById(id);
     el.addEventListener("input", markScanDirty);
@@ -270,6 +274,7 @@ function updateStatusFromData(data) {
   const resetErr = val(data, "/Equipment/WaveCatcher/Variables/device_reset_error") || "";
   setText("device_reset_info", resetErr ? `${resetState}: ${resetErr}` : resetState);
   setText("help_text", val(data, "/Equipment/WaveCatcher/Variables/help"));
+  updateCoincidenceFieldState();
   setText("scan_state", val(data, "/Scan/Threshold/State") || "");
   setText("scan_progress", val(data, "/Scan/Threshold/ProgressPct") || 0);
   setText("scan_csv_path", val(data, "/Scan/Threshold/ResultCsvPath") || "");
@@ -324,6 +329,11 @@ async function applyConfig() {
     await refresh();
     if (transitionInProgress !== 0) { alert("Cannot apply while transition is in progress."); return; }
     if (runState !== 1) { alert("Stop run before applying configuration."); return; }
+    const triggerMode = Number(document.getElementById("trigger_mode").value);
+    if (triggerMode === 3 && selectedChannels.length < 3) {
+      alert("Majority mode requires at least 3 selected channels.");
+      return;
+    }
     const mode = Number(document.getElementById("auto_stop_mode").value);
     let duration = Number(document.getElementById("run_duration_s").value || 0);
     let target = Number(document.getElementById("target_event_count").value || 0);
@@ -388,11 +398,26 @@ function selectedCoincidence() {
 
 function buildCombinedStatus() {
   const mode = Number(document.getElementById("trigger_mode").value || 0);
-  const modeName = ["normal","software","coincidence"][mode] || "normal";
+  const modeName = ["normal","software","coincidence","majority"][mode] || "normal";
   const edgeName = Number(document.getElementById("trigger_edge").value || 0) === 0 ? "pos" : "neg";
   const thr = Number(document.getElementById("trigger_threshold_v").value || 0);
   const chThr = document.getElementById("channel_thresholds_csv").value.trim();
   return `mode=${modeName} edge=${edgeName} channels=${channelsCsv(selectedChannels)} primary=${selectedPrimary()} coincidence=${selectedCoincidence()} thr=${thr.toFixed(3)}V ch_thr=${chThr}`;
+}
+
+function updateCoincidenceFieldState() {
+  const mode = Number(document.getElementById("trigger_mode").value || 0);
+  const coincEl = document.getElementById("coincidence_channel");
+  const hint = document.getElementById("coincidence_hint");
+  const coincidenceActive = mode === 2;
+  coincEl.disabled = !coincidenceActive;
+  if (hint) {
+    hint.textContent = coincidenceActive
+      ? "Used only in Coincidence mode (partner channel)."
+      : (mode === 3
+          ? "Not used in Majority mode (all selected channels are trigger sources)."
+          : "Not used in Normal/Software modes.");
+  }
 }
 
 async function applyTriggerModeSelected() {
@@ -403,6 +428,10 @@ async function applyTriggerModeSelected() {
     if (transitionInProgress !== 0 || runState !== 1) { alert("Stop run and wait for transition idle."); return; }
     if (!selectedChannels.length) { alert("Select at least one channel."); return; }
     const mode = Number(document.getElementById("trigger_mode").value || 0);
+    if (mode === 3 && selectedChannels.length < 3) {
+      alert("Majority mode requires at least 3 selected channels.");
+      return;
+    }
     await mjsonrpc_db_paste([
       "/Equipment/WaveCatcher/Variables/enabled_channels_csv",
       "/Equipment/WaveCatcher/Variables/enabled_channel",
