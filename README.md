@@ -25,7 +25,8 @@ Custom MIDAS + WaveCatcher integration for Bedretto Muons DAQ, including:
 
 ## Web control capabilities (current)
 
-- Trigger mode selection (normal/software/coincidence).
+- Trigger mode selection (normal/software/coincidence/majority).
+- Applied-trigger display and idle WaveCatcher hardware reset from the control page.
 - Per-run channel selection (CSV + primary channel fallback).
 - Single-threshold apply workflow for iterative channel tuning.
 - Auto-stop mode selection (duration XOR target decoded event count).

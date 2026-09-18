@@ -32,6 +32,11 @@ __pycache__/
 wc_test_harness
 wc_api_smoke_test
 wc_midas_frontend
+wc_device_server
+wc_majority_test
+
+# macOS
+.DS_Store
 
 # Local experiment/runtime config
 exptab
