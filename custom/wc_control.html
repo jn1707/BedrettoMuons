@@ -74,10 +74,11 @@
         <button class="mbutton" onclick="applyConfig()">Apply to ODB</button>
         <button class="mbutton" onclick="reloadConfig()">Reload from ODB</button>
         <button class="mbutton" onclick="resetSettings()">Reset all settings</button>
+        <button class="mbutton" onclick="requestHardwareReset()">Reset WaveCatcher hardware</button>
         <button class="mbutton" onclick="startRunSafe()">Start</button>
         <button class="mbutton" onclick="stopRunSafe()">Stop</button>
       </div>
-      <div class="hint">Live refresh pauses while you edit fields. Click Apply to push changes.</div>
+      <div class="hint">Live refresh pauses while you edit fields. Click Apply to push changes. Hardware reset takes ~10 s (ResetDevice settle).</div>
       <div class="row"><span class="lbl">Apply status</span><span id="ui_status" class="mono"></span></div>
       <div class="row"><span class="lbl">Apply error</span><span id="ui_error" class="mono"></span></div>
       <div class="row"><span class="lbl">Run state</span><span id="run_state" class="mono"></span></div>
@@ -85,6 +86,7 @@
       <div class="row"><span class="lbl">Device open state</span><span id="device_open_state" class="mono"></span></div>
       <div class="row"><span class="lbl">Available channels</span><span id="available_channels_info" class="mono"></span></div>
       <div class="row"><span class="lbl">Applied trigger</span><span id="applied_trigger" class="mono"></span></div>
+      <div class="row"><span class="lbl">Hardware reset</span><span id="device_reset_info" class="mono"></span></div>
       <div class="row"><span class="lbl">Help</span><span id="help_text" class="mono"></span></div>
     </td></tr>
   </table>
@@ -139,6 +141,8 @@ const PATHS = [
   "/Equipment/WaveCatcher/Variables/ui_last_apply_error",
   "/Equipment/WaveCatcher/Variables/device_open_state_str",
   "/Equipment/WaveCatcher/Variables/applied_trigger_mode_str",
+  "/Equipment/WaveCatcher/Variables/device_reset_state",
+  "/Equipment/WaveCatcher/Variables/device_reset_error",
   "/Equipment/WaveCatcher/Variables/help",
   "/Equipment/WaveCatcher/Live/available_channels_count",
   "/Equipment/WaveCatcher/Live/available_channels_csv",
@@ -262,6 +266,9 @@ function updateStatusFromData(data) {
   setText("available_channels_info", `${availCount} channels: ${availCsv}`);
   renderChannelButtons();
   setText("applied_trigger", val(data, "/Equipment/WaveCatcher/Variables/applied_trigger_mode_str") || "");
+  const resetState = val(data, "/Equipment/WaveCatcher/Variables/device_reset_state") || "idle";
+  const resetErr = val(data, "/Equipment/WaveCatcher/Variables/device_reset_error") || "";
+  setText("device_reset_info", resetErr ? `${resetState}: ${resetErr}` : resetState);
   setText("help_text", val(data, "/Equipment/WaveCatcher/Variables/help"));
   setText("scan_state", val(data, "/Scan/Threshold/State") || "");
   setText("scan_progress", val(data, "/Scan/Threshold/ProgressPct") || 0);
@@ -512,6 +519,35 @@ async function resetSettings() {
     formDirty = false;
     await refresh(true);
   } finally { uiBusy = false; }
+}
+
+async function requestHardwareReset() {
+  if (uiBusy) return;
+  uiBusy = true;
+  try {
+    await refresh();
+    if (transitionInProgress !== 0 || runState !== 1) {
+      alert("Stop run and wait for transition idle before hardware reset.");
+      return;
+    }
+    if (deviceOpenState !== "ready") {
+      alert("Device is not ready (open state must be ready).");
+      return;
+    }
+    if (!confirm("Reset WaveCatcher hardware now? This calls ResetDevice + SetDefaultParameters and takes ~10 seconds.")) {
+      return;
+    }
+    await mjsonrpc_db_paste([
+      "/Equipment/WaveCatcher/Variables/device_reset_error",
+      "/Equipment/WaveCatcher/Variables/device_reset_state",
+      "/Equipment/WaveCatcher/Variables/device_reset_request"
+    ], ["", "requested", 1]);
+    await refresh(true);
+  } catch (e) {
+    mjsonrpc_error_alert(e);
+  } finally {
+    uiBusy = false;
+  }
 }
 
 async function applyScanSettings() {

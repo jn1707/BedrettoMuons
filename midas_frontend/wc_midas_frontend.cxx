@@ -81,6 +81,7 @@ static DWORD g_next_soft_trigger_ms = 0;
 static DWORD g_run_start_ms = 0;
 static bool g_stop_transition_requested = false;
 static bool g_shutdown_requested = false;
+static bool g_device_reset_in_progress = false;
 static DWORD g_last_live_update_ms = 0;
 static DWORD g_last_analysis_update_ms = 0;
 static std::recursive_mutex g_wc_api_mutex;
@@ -302,10 +303,19 @@ static void ensure_odb_schema_defaults()
    {
       INT applied0 = 0;
       const char *applied_str = "normal";
+      const char *reset_idle = "idle";
+      const char *empty_err = "";
+      INT reset_req = 0;
       db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/applied_trigger_mode",
                    &applied0, sizeof(applied0), 1, TID_INT);
       db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/applied_trigger_mode_str",
                    applied_str, (INT)strlen(applied_str) + 1, 1, TID_STRING);
+      db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_request",
+                   &reset_req, sizeof(reset_req), 1, TID_INT);
+      db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_state",
+                   reset_idle, (INT)strlen(reset_idle) + 1, 1, TID_STRING);
+      db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_error",
+                   empty_err, 1, 1, TID_STRING);
    }
    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/hist_bar0_ch_left",
                 &g_hist_bar0_ch_left,  sizeof(g_hist_bar0_ch_left),  1, TID_INT);
@@ -1012,6 +1022,11 @@ INT begin_of_run(INT run_number, char *error)
    if (!transition_guard.acquired) {
       return FE_ERR_HW;
    }
+   if (g_device_reset_in_progress) {
+      snprintf(error, 256, "WaveCatcher hardware reset in progress; wait ~10s and retry");
+      cm_msg(MERROR, "WaveCatcher", "begin_of_run: blocked by device reset for run=%d", run_number);
+      return FE_ERR_HW;
+   }
    cm_msg(MINFO, "WaveCatcher", "begin_of_run enter run=%d", run_number);
    DWORD bor_t0 = ss_millitime();
    DWORD t_cfg_ms = 0, t_alloc_ms = 0, t_start_ms = 0;
@@ -1255,6 +1270,57 @@ INT frontend_loop(void)
    if (scan_request == 1 && g_run_active) {
       const char *state = "deferred_run_active";
       db_set_value(hDB, 0, "/Scan/Threshold/State", state, (INT)strlen(state) + 1, 1, TID_STRING);
+   }
+
+   /* Idle hardware reset request from online UI (ResetDevice + SetDefaultParameters). */
+   INT reset_request = 0;
+   size = sizeof(reset_request);
+   db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_request",
+                &reset_request, &size, TID_INT, TRUE);
+   if (reset_request == 1) {
+      if (g_run_active || g_transition_active.load() || g_device_reset_in_progress) {
+         const char *state = "deferred_run_active";
+         db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_state",
+                      state, (INT)strlen(state) + 1, 1, TID_STRING);
+      } else if (!g_device_open) {
+         INT zero = 0;
+         const char *state = "error";
+         const char *err = "device not open";
+         db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_request",
+                      &zero, sizeof(zero), 1, TID_INT);
+         db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_state",
+                      state, (INT)strlen(state) + 1, 1, TID_STRING);
+         db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_error",
+                      err, (INT)strlen(err) + 1, 1, TID_STRING);
+      } else {
+         INT zero = 0;
+         const char *running = "running";
+         const char *empty_err = "";
+         db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_request",
+                      &zero, sizeof(zero), 1, TID_INT);
+         db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_state",
+                      running, (INT)strlen(running) + 1, 1, TID_STRING);
+         db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_error",
+                      empty_err, 1, 1, TID_STRING);
+         g_device_reset_in_progress = true;
+         cm_msg(MINFO, "WaveCatcher", "UI-requested hardware reset starting");
+         INT st = wc_force_idle_reset();
+         g_device_reset_in_progress = false;
+         if (st == SUCCESS) {
+            const char *done = "done";
+            db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_state",
+                         done, (INT)strlen(done) + 1, 1, TID_STRING);
+            cm_msg(MINFO, "WaveCatcher", "UI-requested hardware reset completed");
+         } else {
+            const char *state = "error";
+            const char *err = "ResetDevice/SetDefaultParameters failed";
+            db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_state",
+                         state, (INT)strlen(state) + 1, 1, TID_STRING);
+            db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/device_reset_error",
+                         err, (INT)strlen(err) + 1, 1, TID_STRING);
+            cm_msg(MERROR, "WaveCatcher", "UI-requested hardware reset failed status=%d", st);
+         }
+      }
    }
 
    /* Avoid busy-spin when idle. */
