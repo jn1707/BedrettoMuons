@@ -56,6 +56,8 @@
       <div class="row"><span class="lbl">Per-channel thresholds CSV</span><input id="channel_thresholds_csv" class="wide" type="text" placeholder="0:0.02,1:0.03,2:0.05"></div>
       <div class="row"><span class="lbl">Coincidence channel</span><input id="coincidence_channel" class="box" type="number" min="0" max="63"></div>
       <div class="hint" id="coincidence_hint">Used only in Coincidence mode (partner channel).</div>
+      <div class="row"><span class="lbl">Majority min channels</span><input id="majority_min_channels" class="box" type="number" min="1" max="64" value="3"></div>
+      <div class="hint" id="majority_hint">Used only in Majority mode: minimum channels that must fire (K of N selected). Default 3.</div>
       <div class="row"><span class="lbl">Software trigger rate [Hz]</span><input id="sw_trigger_hz" class="box" type="number" min="0"></div>
       <div class="row"><span class="lbl">Auto stop mode</span>
         <select id="auto_stop_mode" class="box">
@@ -88,6 +90,7 @@
       <div class="row"><span class="lbl">Device open state</span><span id="device_open_state" class="mono"></span></div>
       <div class="row"><span class="lbl">Available channels</span><span id="available_channels_info" class="mono"></span></div>
       <div class="row"><span class="lbl">Applied trigger</span><span id="applied_trigger" class="mono"></span></div>
+      <div class="row"><span class="lbl">Applied majority min</span><span id="applied_majority_min" class="mono"></span></div>
       <div class="row"><span class="lbl">Hardware reset</span><span id="device_reset_info" class="mono"></span></div>
       <div class="row"><span class="lbl">Help</span><span id="help_text" class="mono"></span></div>
     </td></tr>
@@ -136,6 +139,7 @@ const PATHS = [
   "/Equipment/WaveCatcher/Variables/channel_thresholds_csv",
   "/Equipment/WaveCatcher/Variables/coincidence_channel",
   "/Equipment/WaveCatcher/Variables/coincidence_threshold_v",
+  "/Equipment/WaveCatcher/Variables/majority_min_channels",
   "/Equipment/WaveCatcher/Variables/sw_trigger_hz",
   "/Equipment/WaveCatcher/Variables/auto_stop_mode",
   "/Equipment/WaveCatcher/Variables/run_duration_s",
@@ -144,6 +148,7 @@ const PATHS = [
   "/Equipment/WaveCatcher/Variables/ui_last_apply_error",
   "/Equipment/WaveCatcher/Variables/device_open_state_str",
   "/Equipment/WaveCatcher/Variables/applied_trigger_mode_str",
+  "/Equipment/WaveCatcher/Variables/applied_majority_min_channels",
   "/Equipment/WaveCatcher/Variables/device_reset_state",
   "/Equipment/WaveCatcher/Variables/device_reset_error",
   "/Equipment/WaveCatcher/Variables/help",
@@ -230,14 +235,14 @@ function markScanDirty() { scanDirty = true; }
 function bindDirtyHandlers() {
   for (const id of [
     "trigger_mode","trigger_edge","enabled_channel","enabled_channels_csv","trigger_threshold_v","channel_thresholds_csv",
-    "coincidence_channel","sw_trigger_hz","auto_stop_mode",
+    "coincidence_channel","majority_min_channels","sw_trigger_hz","auto_stop_mode",
     "run_duration_s","target_event_count"
   ]) {
     const el = document.getElementById(id);
     el.addEventListener("input", markDirty);
     el.addEventListener("change", markDirty);
   }
-  document.getElementById("trigger_mode").addEventListener("change", updateCoincidenceFieldState);
+  document.getElementById("trigger_mode").addEventListener("change", updateModeFieldState);
   for (const id of ["scan_start_v","scan_stop_v","scan_step_v","scan_dwell_s","scan_channels_csv","scan_trigger_mode"]) {
     const el = document.getElementById(id);
     el.addEventListener("input", markScanDirty);
@@ -270,11 +275,21 @@ function updateStatusFromData(data) {
   setText("available_channels_info", `${availCount} channels: ${availCsv}`);
   renderChannelButtons();
   setText("applied_trigger", val(data, "/Equipment/WaveCatcher/Variables/applied_trigger_mode_str") || "");
+  {
+    const reqMaj = val(data, "/Equipment/WaveCatcher/Variables/majority_min_channels");
+    const hwMaj = val(data, "/Equipment/WaveCatcher/Variables/applied_majority_min_channels");
+    const modeStr = val(data, "/Equipment/WaveCatcher/Variables/applied_trigger_mode_str") || "";
+    if (modeStr === "majority" || Number(val(data, "/Equipment/WaveCatcher/Variables/trigger_mode")) === 3) {
+      setText("applied_majority_min", `requested=${reqMaj ?? ""} hw_readback=${hwMaj ?? ""}`);
+    } else {
+      setText("applied_majority_min", "n/a");
+    }
+  }
   const resetState = val(data, "/Equipment/WaveCatcher/Variables/device_reset_state") || "idle";
   const resetErr = val(data, "/Equipment/WaveCatcher/Variables/device_reset_error") || "";
   setText("device_reset_info", resetErr ? `${resetState}: ${resetErr}` : resetState);
   setText("help_text", val(data, "/Equipment/WaveCatcher/Variables/help"));
-  updateCoincidenceFieldState();
+  updateModeFieldState();
   setText("scan_state", val(data, "/Scan/Threshold/State") || "");
   setText("scan_progress", val(data, "/Scan/Threshold/ProgressPct") || 0);
   setText("scan_csv_path", val(data, "/Scan/Threshold/ResultCsvPath") || "");
@@ -297,6 +312,7 @@ function fillConfigFromData(data, force=false) {
   document.getElementById("trigger_threshold_v").value = val(data, "/Equipment/WaveCatcher/Variables/trigger_threshold_v");
   document.getElementById("channel_thresholds_csv").value = val(data, "/Equipment/WaveCatcher/Variables/channel_thresholds_csv") || "";
   document.getElementById("coincidence_channel").value = val(data, "/Equipment/WaveCatcher/Variables/coincidence_channel");
+  document.getElementById("majority_min_channels").value = val(data, "/Equipment/WaveCatcher/Variables/majority_min_channels") ?? 3;
   document.getElementById("sw_trigger_hz").value = val(data, "/Equipment/WaveCatcher/Variables/sw_trigger_hz");
   document.getElementById("auto_stop_mode").value = String(val(data, "/Equipment/WaveCatcher/Variables/auto_stop_mode"));
   document.getElementById("run_duration_s").value = val(data, "/Equipment/WaveCatcher/Variables/run_duration_s");
@@ -330,9 +346,13 @@ async function applyConfig() {
     if (transitionInProgress !== 0) { alert("Cannot apply while transition is in progress."); return; }
     if (runState !== 1) { alert("Stop run before applying configuration."); return; }
     const triggerMode = Number(document.getElementById("trigger_mode").value);
-    if (triggerMode === 3 && selectedChannels.length < 3) {
-      alert("Majority mode requires at least 3 selected channels.");
-      return;
+    const majMin = Number(document.getElementById("majority_min_channels").value || 3);
+    if (triggerMode === 3) {
+      if (majMin < 1) { alert("Majority min channels must be >= 1."); return; }
+      if (selectedChannels.length < majMin) {
+        alert(`Majority mode needs at least ${majMin} selected channels (majority min).`);
+        return;
+      }
     }
     const mode = Number(document.getElementById("auto_stop_mode").value);
     let duration = Number(document.getElementById("run_duration_s").value || 0);
@@ -350,6 +370,7 @@ async function applyConfig() {
       "/Equipment/WaveCatcher/Variables/channel_thresholds_csv",
       "/Equipment/WaveCatcher/Variables/coincidence_channel",
       "/Equipment/WaveCatcher/Variables/coincidence_threshold_v",
+      "/Equipment/WaveCatcher/Variables/majority_min_channels",
       "/Equipment/WaveCatcher/Variables/sw_trigger_hz",
       "/Equipment/WaveCatcher/Variables/auto_stop_mode",
       "/Equipment/WaveCatcher/Variables/run_duration_s",
@@ -366,6 +387,7 @@ async function applyConfig() {
       document.getElementById("channel_thresholds_csv").value.trim(),
       Number(document.getElementById("coincidence_channel").value || (selectedChannels[1] ?? selectedChannels[0] ?? 0)),
       thr,
+      majMin,
       Number(document.getElementById("sw_trigger_hz").value || 0),
       mode,
       duration,
@@ -402,21 +424,31 @@ function buildCombinedStatus() {
   const edgeName = Number(document.getElementById("trigger_edge").value || 0) === 0 ? "pos" : "neg";
   const thr = Number(document.getElementById("trigger_threshold_v").value || 0);
   const chThr = document.getElementById("channel_thresholds_csv").value.trim();
-  return `mode=${modeName} edge=${edgeName} channels=${channelsCsv(selectedChannels)} primary=${selectedPrimary()} coincidence=${selectedCoincidence()} thr=${thr.toFixed(3)}V ch_thr=${chThr}`;
+  const majMin = Number(document.getElementById("majority_min_channels").value || 3);
+  return `mode=${modeName} edge=${edgeName} channels=${channelsCsv(selectedChannels)} primary=${selectedPrimary()} coincidence=${selectedCoincidence()} maj_min=${majMin} thr=${thr.toFixed(3)}V ch_thr=${chThr}`;
 }
 
-function updateCoincidenceFieldState() {
+function updateModeFieldState() {
   const mode = Number(document.getElementById("trigger_mode").value || 0);
   const coincEl = document.getElementById("coincidence_channel");
-  const hint = document.getElementById("coincidence_hint");
+  const majEl = document.getElementById("majority_min_channels");
+  const coincHint = document.getElementById("coincidence_hint");
+  const majHint = document.getElementById("majority_hint");
   const coincidenceActive = mode === 2;
+  const majorityActive = mode === 3;
   coincEl.disabled = !coincidenceActive;
-  if (hint) {
-    hint.textContent = coincidenceActive
+  majEl.disabled = !majorityActive;
+  if (coincHint) {
+    coincHint.textContent = coincidenceActive
       ? "Used only in Coincidence mode (partner channel)."
-      : (mode === 3
+      : (majorityActive
           ? "Not used in Majority mode (all selected channels are trigger sources)."
           : "Not used in Normal/Software modes.");
+  }
+  if (majHint) {
+    majHint.textContent = majorityActive
+      ? "Majority mode: minimum channels that must fire (K of N selected). Confirmed after apply via hardware readback."
+      : "Used only in Majority mode.";
   }
 }
 
@@ -428,14 +460,19 @@ async function applyTriggerModeSelected() {
     if (transitionInProgress !== 0 || runState !== 1) { alert("Stop run and wait for transition idle."); return; }
     if (!selectedChannels.length) { alert("Select at least one channel."); return; }
     const mode = Number(document.getElementById("trigger_mode").value || 0);
-    if (mode === 3 && selectedChannels.length < 3) {
-      alert("Majority mode requires at least 3 selected channels.");
-      return;
+    const majMin = Number(document.getElementById("majority_min_channels").value || 3);
+    if (mode === 3) {
+      if (majMin < 1) { alert("Majority min channels must be >= 1."); return; }
+      if (selectedChannels.length < majMin) {
+        alert(`Majority mode needs at least ${majMin} selected channels (majority min).`);
+        return;
+      }
     }
     await mjsonrpc_db_paste([
       "/Equipment/WaveCatcher/Variables/enabled_channels_csv",
       "/Equipment/WaveCatcher/Variables/enabled_channel",
       "/Equipment/WaveCatcher/Variables/coincidence_channel",
+      "/Equipment/WaveCatcher/Variables/majority_min_channels",
       "/Equipment/WaveCatcher/Variables/trigger_mode",
       "/Equipment/WaveCatcher/Variables/ui_last_apply_status",
       "/Equipment/WaveCatcher/Variables/ui_last_apply_error"
@@ -443,6 +480,7 @@ async function applyTriggerModeSelected() {
       channelsCsv(selectedChannels),
       selectedPrimary(),
       selectedCoincidence(),
+      majMin,
       mode,
       buildCombinedStatus(),
       ""
@@ -536,6 +574,7 @@ async function resetSettings() {
       "/Equipment/WaveCatcher/Variables/channel_thresholds_csv",
       "/Equipment/WaveCatcher/Variables/coincidence_channel",
       "/Equipment/WaveCatcher/Variables/coincidence_threshold_v",
+      "/Equipment/WaveCatcher/Variables/majority_min_channels",
       "/Equipment/WaveCatcher/Variables/sw_trigger_hz",
       "/Equipment/WaveCatcher/Variables/auto_stop_mode",
       "/Equipment/WaveCatcher/Variables/run_duration_s",
@@ -543,7 +582,7 @@ async function resetSettings() {
       "/Equipment/WaveCatcher/Variables/ui_last_apply_status",
       "/Equipment/WaveCatcher/Variables/ui_last_apply_error"
     ], [
-      0, 0, 0, "", 0.03, 0.03, false, "", 1, 0.03, 0, 0, 0, 0, "reset", ""
+      0, 0, 0, "", 0.03, 0.03, false, "", 1, 0.03, 3, 0, 0, 0, 0, "reset", ""
     ]);
     formDirty = false;
     await refresh(true);

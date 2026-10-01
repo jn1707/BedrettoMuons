@@ -51,6 +51,8 @@ static int g_enabled_channel = 0;
 static int g_sw_trigger_hz = 0;
 static int g_trigger_mode_odb = 0; /* 0=normal, 1=soft, 2=coincidence, 3=majority */
 static int g_applied_trigger_mode = 0; /* last hardware mode actually applied (0..3) */
+static int g_majority_min_channels = 3; /* requested K for majority (K-of-N) */
+static int g_applied_majority_min_channels = 0; /* last GetMajorityTriggerThreshold readback */
 static int g_coincidence_channel = 1;
 static float g_coincidence_threshold_v = 0.050f;
 static int g_sampling_frequency_mhz = 3200;
@@ -250,6 +252,10 @@ static void wc_update_run_summary(INT run_number)
       const char *applied_name = wc_trigger_mode_name(g_applied_trigger_mode);
       wc_set_run_summary_value("applied_trigger_mode", &g_applied_trigger_mode, sizeof(g_applied_trigger_mode), TID_INT);
       wc_set_run_summary_value("applied_trigger_mode_str", applied_name, (INT)strlen(applied_name) + 1, TID_STRING);
+      wc_set_run_summary_value("majority_min_channels", &g_majority_min_channels,
+                               sizeof(g_majority_min_channels), TID_INT);
+      wc_set_run_summary_value("applied_majority_min_channels", &g_applied_majority_min_channels,
+                               sizeof(g_applied_majority_min_channels), TID_INT);
    }
    wc_set_run_summary_value("trigger_edge", &trigger_edge, sizeof(trigger_edge), TID_INT);
    wc_set_run_summary_value("enabled_channel", &g_enabled_channel, sizeof(g_enabled_channel), TID_INT);
@@ -288,7 +294,8 @@ static void ensure_odb_schema_defaults()
    db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/ui_last_apply_error",
                 empty, 1, 1, TID_STRING);
    const char *help =
-      "trigger_mode: 0=normal 1=software 2=coincidence(2-channel primary+partner) 3=majority(N>=3 selected channels) | "
+      "trigger_mode: 0=normal 1=software 2=coincidence(2-channel primary+partner) 3=majority(K-of-N via majority_min_channels) | "
+      "majority_min_channels=min channels that must fire in majority mode (default 3) | "
       "trigger_edge: 0=pos 1=neg | "
       "trigger_threshold_v=primary threshold | "
       "selected_threshold_v=bulk threshold for enabled_channels_csv if apply_threshold_to_selected=true | "
@@ -306,6 +313,15 @@ static void ensure_odb_schema_defaults()
       const char *reset_idle = "idle";
       const char *empty_err = "";
       INT reset_req = 0;
+      /* Create majority_min_channels only if missing: load_settings uses create=TRUE with default 3. */
+      {
+         INT maj = 3;
+         INT maj_size = sizeof(maj);
+         db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/majority_min_channels",
+                      &maj, &maj_size, TID_INT, TRUE);
+      }
+      db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/applied_majority_min_channels",
+                   &applied0, sizeof(applied0), 1, TID_INT);
       db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/applied_trigger_mode",
                    &applied0, sizeof(applied0), 1, TID_INT);
       db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/applied_trigger_mode_str",
@@ -538,9 +554,10 @@ static std::string build_apply_summary()
    const char *edge = (g_trigger_edge == WAVECAT64CH_POS_EDGE) ? "pos" : "neg";
    char buf[1024];
    snprintf(buf, sizeof(buf),
-            "mode=%s edge=%s primary=%d channels=%s thr=%.3fV ch_thr=%s coinc=%d@%.3fV sw=%dHz auto=%d dur=%ds target=%d",
+            "mode=%s edge=%s primary=%d channels=%s thr=%.3fV ch_thr=%s coinc=%d@%.3fV maj_min=%d(hw=%d) sw=%dHz auto=%d dur=%ds target=%d",
             mode, edge, g_enabled_channel, g_enabled_channels_csv.c_str(), g_trigger_threshold_v,
             g_channel_thresholds_csv.c_str(), g_coincidence_channel, g_coincidence_threshold_v,
+            g_majority_min_channels, g_applied_majority_min_channels,
             g_sw_trigger_hz, g_auto_stop_mode, g_run_duration_s, g_target_event_count);
    return std::string(buf);
 }
@@ -587,7 +604,8 @@ static void load_settings_from_odb()
    char ui_status[256] = "idle";
    char ui_error[256] = "";
    char help_text[1024] =
-      "trigger_mode: 0=normal 1=software 2=coincidence(2-channel primary+partner) 3=majority(N>=3 selected channels) | "
+      "trigger_mode: 0=normal 1=software 2=coincidence(2-channel primary+partner) 3=majority(K-of-N via majority_min_channels) | "
+      "majority_min_channels=min channels that must fire in majority mode (default 3) | "
       "trigger_edge: 0=pos 1=neg | "
       "trigger_threshold_v=primary threshold | "
       "selected_threshold_v=bulk threshold for enabled_channels_csv if apply_threshold_to_selected=true | "
@@ -620,6 +638,18 @@ static void load_settings_from_odb()
    db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/trigger_mode",
                 &trig_mode, &size, TID_INT, TRUE);
    g_trigger_mode_odb = trig_mode;
+
+   {
+      INT maj_min = g_majority_min_channels;
+      size = sizeof(maj_min);
+      db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/majority_min_channels",
+                   &maj_min, &size, TID_INT, TRUE);
+      if (maj_min < 1)
+         maj_min = 1;
+      if (maj_min > 64)
+         maj_min = 64;
+      g_majority_min_channels = maj_min;
+   }
 
    size = sizeof(coinc_ch);
    db_get_value(hDB, 0, "/Equipment/WaveCatcher/Variables/coincidence_channel",
@@ -791,8 +821,16 @@ static INT wc_apply_run_configuration()
    std::sort(selected_channels.begin(), selected_channels.end());
    selected_channels.erase(std::unique(selected_channels.begin(), selected_channels.end()), selected_channels.end());
 
-   if (use_majority && selected_channels.size() < 3) {
-      wc_set_ui_status("error", "Majority mode requires at least 3 selected channels");
+   if (use_majority && (int)selected_channels.size() < g_majority_min_channels) {
+      char err[128];
+      snprintf(err, sizeof(err),
+               "Majority mode needs at least %d selected channels (majority_min_channels)",
+               g_majority_min_channels);
+      wc_set_ui_status("error", err);
+      return FE_ERR_HW;
+   }
+   if (use_majority && g_majority_min_channels < 1) {
+      wc_set_ui_status("error", "majority_min_channels must be >= 1");
       return FE_ERR_HW;
    }
 
@@ -904,8 +942,8 @@ static INT wc_apply_run_configuration()
    if (use_majority) {
       trig_mode = WAVECAT64CH_TRIGGER_MAJORITY;
       applied_mode = 3;
-      cm_msg(MINFO, "WaveCatcher", "Applying MAJORITY trigger on %zu selected channels",
-             selected_channels.size());
+      cm_msg(MINFO, "WaveCatcher", "Applying MAJORITY trigger on %zu selected channels (min=%d)",
+             selected_channels.size(), g_majority_min_channels);
    } else if (use_coincidence) {
       trig_mode = WAVECAT64CH_TRIGGER_COINCIDENCE;
       applied_mode = 2;
@@ -921,6 +959,35 @@ static INT wc_apply_run_configuration()
    }
    wc_publish_applied_trigger_mode(applied_mode);
 
+   g_applied_majority_min_channels = 0;
+   if (use_majority) {
+      cm_msg(MINFO, "WaveCatcher",
+             "NEXT CALL: WAVECAT64CH_SetMajorityTriggerThreshold min=%d",
+             g_majority_min_channels);
+      st = wc_check(WAVECAT64CH_SetMajorityTriggerThreshold(g_majority_min_channels),
+                    "SetMajorityTriggerThreshold");
+      if (st != SUCCESS) {
+         wc_set_ui_status("error", "SetMajorityTriggerThreshold failed");
+         return st;
+      }
+      {
+         int hw_maj = 0;
+         cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_GetMajorityTriggerThreshold");
+         st = wc_check(WAVECAT64CH_GetMajorityTriggerThreshold(&hw_maj),
+                       "GetMajorityTriggerThreshold");
+         if (st != SUCCESS) {
+            wc_set_ui_status("error", "GetMajorityTriggerThreshold failed");
+            return st;
+         }
+         g_applied_majority_min_channels = hw_maj;
+         cm_msg(MINFO, "WaveCatcher",
+                "Majority threshold confirmed by hardware: requested=%d readback=%d",
+                g_majority_min_channels, g_applied_majority_min_channels);
+      }
+   }
+   db_set_value(hDB, 0, "/Equipment/WaveCatcher/Variables/applied_majority_min_channels",
+                &g_applied_majority_min_channels, sizeof(g_applied_majority_min_channels), 1, TID_INT);
+
    cm_msg(MINFO, "WaveCatcher", "NEXT CALL: WAVECAT64CH_PrepareEvent");
    st = wc_check(WAVECAT64CH_PrepareEvent(), "PrepareEvent");
    if (st != SUCCESS) {
@@ -929,9 +996,10 @@ static INT wc_apply_run_configuration()
    }
 
    cm_msg(MINFO, "WaveCatcher",
-          "BOR settings: ch=%d thr=%.3f edge=%d mode=%d odb_mode=%d applied=%d sw_hz=%d",
+          "BOR settings: ch=%d thr=%.3f edge=%d mode=%d odb_mode=%d applied=%d maj_min=%d(hw=%d) sw_hz=%d",
           g_enabled_channel, g_trigger_threshold_v, (int)g_trigger_edge,
-          (int)trig_mode, g_trigger_mode_odb, applied_mode, g_sw_trigger_hz);
+          (int)trig_mode, g_trigger_mode_odb, applied_mode,
+          g_majority_min_channels, g_applied_majority_min_channels, g_sw_trigger_hz);
    cm_msg(MINFO, "WaveCatcher",
           "BOR extras: csv=%s sel_thr=%.3f apply_sel=%d coinc_ch=%d coinc_thr=%.3f dur_s=%d auto=%d target=%d",
           g_enabled_channels_csv.c_str(), g_selected_threshold_v, (int)g_apply_threshold_to_selected,

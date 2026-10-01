@@ -20,7 +20,7 @@ Requires `MIDAS_INC`, `MIDAS_LIB`, `WC_INC_DIR`, and `WC_LIB_DIR` (or the Makefi
 make MIDAS_INC=/path/to/midas/include MIDAS_LIB=/path/to/midas/lib
 ```
 
-Artifacts built: `wc_midas_frontend`, `wc_test_harness`, `wc_api_smoke_test`, `wc_device_server`, `wc_majority_test`.
+Artifacts built: `wc_midas_frontend`, `wc_test_harness`, `wc_api_smoke_test`, `wc_majority_test`. (`wc_device_server` is optional and not part of `make all` — source is not in this repo.)
 
 ## Start the DAQ stack
 
@@ -55,7 +55,7 @@ MIDAS polled equipment (`EQ_POLLED`, event ID 1201, name `"WaveCatcher"`).
 
 **Device lifecycle:** `OpenDevice` runs in `frontend_init` (not BOR), with a 10 s settle after `ResetDevice`. Device stays open between runs — only closed at `frontend_exit`. BOR calls `ResetDevice` + `SetDefaultParameters` again as a baseline reset before applying settings.
 
-**ODB settings flow:** All run parameters live under `/Equipment/WaveCatcher/Variables/`. BOR calls `load_settings_from_odb()` → `wc_apply_run_configuration()` which issues `SetChannelState`, `SetTriggerSourceState`, `SetTriggerEdge`, `SetTriggerThreshold`, `SetTriggerMode`, `PrepareEvent` per active channel. Mode 2 uses `TRIGGER_COINCIDENCE` (primary+partner); mode 3 uses `TRIGGER_MAJORITY` on selected channels (≥3 required). Idle hardware reset is available via ODB `device_reset_request` from the control page.
+**ODB settings flow:** All run parameters live under `/Equipment/WaveCatcher/Variables/`. BOR calls `load_settings_from_odb()` → `wc_apply_run_configuration()` which issues `SetChannelState`, `SetTriggerSourceState`, `SetTriggerEdge`, `SetTriggerThreshold`, `SetTriggerMode`, `PrepareEvent` per active channel. Mode 2 uses `TRIGGER_COINCIDENCE` (primary+partner); mode 3 uses `TRIGGER_MAJORITY` on selected channels plus `SetMajorityTriggerThreshold(majority_min_channels)` with hardware readback. Idle hardware reset is available via ODB `device_reset_request` from the control page.
 
 **Readout loop:** `poll_event` calls `ReadEventBuffer`; on success sets `g_event_in_buffer`. `read_wavecatcher_event` calls `DecodeEvent` then `ReadChannelDataStruct` per channel, writing three MIDAS banks:
 - `WCHD` (`DWORD[4]`): EventID, TDC\_low, TDC\_high, channel\_count
@@ -99,9 +99,9 @@ Thin `ctypes` wrapper around `libWaveCatcher64ch_v288.so`. Mirrors the C++ API s
 | 0 | Normal (hardware threshold) |
 | 1 | Software trigger at `sw_trigger_hz` |
 | 2 | Coincidence (primary + `coincidence_channel`) |
-| 3 | Majority (≥3 channels via `enabled_channels_csv`) |
+| 3 | Majority (K of N selected channels; `majority_min_channels`, default 3) |
 
-Applied hardware mode is also published as `applied_trigger_mode` / `applied_trigger_mode_str` under `/Equipment/WaveCatcher/Variables/`.
+Applied hardware mode is also published as `applied_trigger_mode` / `applied_trigger_mode_str` under `/Equipment/WaveCatcher/Variables/`. Majority K is set with `WAVECAT64CH_SetMajorityTriggerThreshold` and confirmed via `applied_majority_min_channels` (`GetMajorityTriggerThreshold` readback).
 
 ### Auto-stop mode encoding (ODB `auto_stop_mode`)
 

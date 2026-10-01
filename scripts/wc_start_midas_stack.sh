@@ -136,6 +136,49 @@ if [[ "${WC_DISABLE_CUSTOM_CONTROL}" == "1" ]]; then
   echo "WC_DISABLE_CUSTOM_CONTROL=1 is ignored; keeping /custom/wc_control.html unchanged."
 fi
 
+# Deploy custom pages into the experiment custom/ dir and ensure mhttpd menu
+# entries exist under /Custom/. Without these ODB keys the left-nav links vanish
+# even when the HTML files are present.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_CUSTOM=""
+for cand in \
+  "${SCRIPT_DIR}/../custom" \
+  "${MIDAS_DIR}/custom" \
+  "/home/morenoma/Documents/GitRepos/BedrettoMuons/custom"
+do
+  if [[ -f "${cand}/wc_control.html" ]]; then
+    REPO_CUSTOM="$(cd "${cand}" && pwd)"
+    break
+  fi
+done
+
+CUSTOM_DST="${MIDAS_DIR}/custom"
+mkdir -p "${CUSTOM_DST}"
+if [[ -n "${REPO_CUSTOM}" ]]; then
+  for f in wc_control.html wc_monitoring.html wc_summary.html messages.js spinning-wheel.gif; do
+    if [[ -f "${REPO_CUSTOM}/${f}" ]]; then
+      cp -f "${REPO_CUSTOM}/${f}" "${CUSTOM_DST}/${f}"
+    fi
+  done
+  echo "Custom pages synced: ${REPO_CUSTOM} -> ${CUSTOM_DST}"
+else
+  echo "WARNING: could not find repo custom/ with wc_control.html; left-nav may be empty."
+fi
+
+ensure_custom_menu() {
+  local label="$1"
+  local file="$2"
+  odbedit -e wavecatcher -c "mkdir '/Custom'" >/dev/null 2>&1 || true
+  # create may fail if key exists; set always refreshes the file binding
+  odbedit -e wavecatcher -c "create STRING '/Custom/${label}'" >/dev/null 2>&1 || true
+  odbedit -e wavecatcher -c "set '/Custom/${label}' '${file}'" >/dev/null 2>&1 || true
+}
+ensure_custom_menu "WaveCatcher Control" "wc_control.html"
+ensure_custom_menu "WaveCatcher Monitoring" "wc_monitoring.html"
+ensure_custom_menu "WaveCatcher Summary" "wc_summary.html"
+echo "Custom menu keys under /Custom/:"
+odbedit -e wavecatcher -c "ls '/Custom'" 2>/dev/null || true
+
 # Start WaveCatcher MIDAS frontend (direct hardware readout path).
 # Use setsid to keep non-daemon frontend alive after launcher exits.
 setsid /home/morenoma/online_wc/midas_frontend/wc_midas_frontend -e wavecatcher > /home/morenoma/online_wc/wc_midas_frontend.log 2>&1 < /dev/null &
